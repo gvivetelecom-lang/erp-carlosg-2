@@ -1,7 +1,7 @@
 /**
  * firebase-config.js
  *
- * Proyecto Firebase: erp-carlosg.
+ * Proyecto Firebase: erp-carlosg-2.
  *
  * Nota: esta app usa el SDK "compat" de Firebase (scripts <script> clásicos,
  * variable global `firebase`) porque así está armado el resto del sistema
@@ -17,13 +17,12 @@
  */
 
 const firebaseConfig = {
-  apiKey: "AIzaSyBjOKJe0t1PX-k9Sihw0w7Gi6DIr_xxyFU",
-  authDomain: "erp-carlosg.firebaseapp.com",
-  projectId: "erp-carlosg",
-  storageBucket: "erp-carlosg.firebasestorage.app",
-  messagingSenderId: "284155280399",
-  appId: "1:284155280399:web:a7a11a553592add1c5377a",
-  measurementId: "G-1H8VDTGYPW",
+  apiKey: "AIzaSyAEHWssvMg4ypJJG8hmd2fhIOzoVCZ4L5k",
+  authDomain: "erp-carlosg-2.firebaseapp.com",
+  projectId: "erp-carlosg-2",
+  storageBucket: "erp-carlosg-2.firebasestorage.app",
+  messagingSenderId: "403699945741",
+  appId: "1:403699945741:web:8b158feec35b1601c36044",
 };
 
 firebase.initializeApp(firebaseConfig);
@@ -37,7 +36,7 @@ db.enablePersistence({ synchronizeTabs: true }).catch((err) => {
   console.warn("Persistencia offline no disponible:", err.code);
 });
 
-const APP_VERSION = "0.10.0";
+const APP_VERSION = "0.10.1";
 
 // Analytics (measurementId incluido en el proyecto) no se está usando en
 // esta app: es un sistema interno de gestión, no un sitio con visitantes
