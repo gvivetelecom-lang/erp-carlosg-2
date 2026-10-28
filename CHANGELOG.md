@@ -3,6 +3,41 @@
 Versionado semántico informal: patch para correcciones, minor para
 nuevas funcionalidades (sección 17.2 de la especificación funcional).
 
+## [0.11.0] — Facturación / POS: Punto de venta, Ventas y Clientes
+
+### Agregado
+- Facturación / POS → Clientes: maestro (nombre, RUC/C.I., teléfono,
+  email, dirección) con baja lógica. Acumula `saldoPendiente` por ventas a crédito.
+- Facturación / POS → Punto de venta: buscador por nombre/código y
+  lector de código de barra (Enter agrega directo), carrito con cantidades,
+  precio mayorista automático al llegar a la cantidad mínima, descuento
+  (solo admin/gerencia/cajero), pagos divididos (efectivo, tarjeta,
+  transferencia, crédito a cobrar), vuelto de efectivo y selección de
+  depósito de salida.
+- La venta se registra en una sola transacción: código V-000001, precios
+  tomados del producto en ese momento, valida stock suficiente, descuenta
+  `stockPorDeposito`/`stockTotal`, genera movimientos de stock tipo
+  "egreso" y suma el crédito al saldo del cliente.
+- Ticket interno de 80 mm en PDF (con logo), descargable al vender y
+  desde el historial. Sin validez fiscal.
+- Facturación / POS → Ventas: historial con filtro contado/crédito, detalle y reimpresión.
+- Campos reservados en cada venta para después: `fiscal: null` (SIFEN),
+  `cajaId: null` (cajas), `iva: null` por ítem.
+- Finanzas → "Clientes" pasó a llamarse "Cuentas a cobrar" (pronto).
+
+### Reglas de seguridad
+- Cajero y vendedor pueden actualizar en productos solo `stockPorDeposito`,
+  `stockTotal` y `actualizadoEn`, y crear movimientos de stock solo de
+  tipo egreso. Vendedor puede crear ventas.
+
+## [0.10.1] — Migración a nuevo proyecto Firebase
+
+### Cambiado
+- `firebase-config.js` apunta al proyecto `erp-carlosg-2` (nueva cuenta
+  de Google). Sitio: https://gvivetelecom-lang.github.io/erp-carlosg-2/
+- Se agregaron scripts de respaldo/migración en `migracion/`
+  (exportar e importar toda la base, conservando IDs y contadores).
+
 ## [0.10.0] — Compras: Órdenes de compra
 
 ### Agregado

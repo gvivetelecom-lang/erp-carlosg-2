@@ -97,14 +97,16 @@ const MENU = [
     key: "finanzas", label: "Finanzas", icon: "FI",
     children: [
       { key: "bancos", label: "Bancos", soon: true },
-      { key: "clientes", label: "Clientes", soon: true },
+      { key: "cuentas-cobrar", label: "Cuentas a cobrar", soon: true },
       { key: "pagos", label: "Pagos a proveedores", soon: true },
     ],
   },
   {
     key: "facturacion", label: "Facturación / POS", icon: "FA",
     children: [
-      { key: "pos", label: "Punto de venta", soon: true },
+      { key: "pos", label: "Punto de venta" },
+      { key: "ventas", label: "Ventas" },
+      { key: "clientes", label: "Clientes" },
       { key: "cajas", label: "Cajas", soon: true },
       { key: "vendedores", label: "Vendedores", soon: true },
     ],
@@ -2370,6 +2372,662 @@ function OrdenesCompraPage({ currentUid, currentUserName }) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Facturación / POS · Punto de venta, Ventas y Clientes                */
+/* El comprobante por ahora es un ticket interno (V-000001). La         */
+/* factura electrónica SIFEN se activa después: el documento de venta   */
+/* ya trae `fiscal: null` y `cajaId: null` reservados.                  */
+/* ------------------------------------------------------------------ */
+
+const METODOS_PAGO = {
+  efectivo: "Efectivo",
+  tarjeta: "Tarjeta",
+  transferencia: "Transferencia",
+  credito: "Crédito (a cobrar)",
+};
+
+/** Precio unitario según cantidad: mayorista si llega al mínimo, si no minorista. */
+function precioUnitarioPara(producto, cantidad) {
+  const may = producto.precioMayorista;
+  const min = producto.precioMinorista;
+  if (producto.cantidadMayorista > 0 && may != null && cantidad >= producto.cantidadMayorista) {
+    return { precio: Number(may), tipoPrecio: "mayorista" };
+  }
+  if (min != null) return { precio: Number(min), tipoPrecio: "minorista" };
+  if (may != null) return { precio: Number(may), tipoPrecio: "mayorista" };
+  return { precio: null, tipoPrecio: null };
+}
+
+async function registrarVenta({
+  depositoId, clienteId, items, descuento, pagos, usuarioId, usuarioNombre,
+}) {
+  const ids = items.map((it) => it.productoId);
+  if (new Set(ids).size !== ids.length) throw new Error("Hay un producto repetido en el carrito.");
+
+  const contadorVentaRef = db.collection("contadores").doc("ventas");
+  const contadorMovRef = db.collection("contadores").doc("movimientosStock");
+  const ventaRef = db.collection("ventas").doc();
+  const clienteRef = clienteId ? db.collection("clientes").doc(clienteId) : null;
+  const productoRefs = items.map((it) => db.collection("productos").doc(it.productoId));
+  let resultado = null;
+
+  await db.runTransaction(async (tx) => {
+    // Lecturas primero.
+    const clienteDoc = clienteRef ? await tx.get(clienteRef) : null;
+    const productoDocs = await Promise.all(productoRefs.map((ref) => tx.get(ref)));
+    const contadorVentaDoc = await tx.get(contadorVentaRef);
+    const contadorMovDoc = await tx.get(contadorMovRef);
+
+    if (clienteRef && !clienteDoc.exists) throw new Error("El cliente ya no existe.");
+
+    const siguienteVenta = (contadorVentaDoc.exists ? contadorVentaDoc.data().ultimo || 0 : 0) + 1;
+    let siguienteMov = contadorMovDoc.exists ? contadorMovDoc.data().ultimo || 0 : 0;
+    const codigoVenta = "V-" + String(siguienteVenta).padStart(6, "0");
+
+    let subtotal = 0;
+    const itemsGuardados = [];
+    const updates = [];
+
+    items.forEach((it, idx) => {
+      const doc = productoDocs[idx];
+      if (!doc.exists) throw new Error("Uno de los productos ya no existe.");
+      const p = doc.data();
+      if (p.activo === false) throw new Error(`"${p.nombre}" está inactivo.`);
+      const { precio, tipoPrecio } = precioUnitarioPara(p, it.cantidad);
+      if (precio == null) throw new Error(`"${p.nombre}" no tiene precio cargado.`);
+
+      const stockPorDeposito = { ...(p.stockPorDeposito || {}) };
+      const actual = stockPorDeposito[depositoId] || 0;
+      if (actual < it.cantidad) {
+        throw new Error(`Stock insuficiente de "${p.nombre}" (hay ${actual}, se pidió ${it.cantidad}).`);
+      }
+      stockPorDeposito[depositoId] = actual - it.cantidad;
+      const stockTotal = Object.values(stockPorDeposito).reduce((a, b) => a + b, 0);
+
+      const sub = precio * it.cantidad;
+      subtotal += sub;
+      itemsGuardados.push({
+        productoId: it.productoId,
+        codigoInterno: p.codigoInterno || null,
+        nombreProducto: p.nombre,
+        cantidad: it.cantidad,
+        precioUnitario: precio,
+        tipoPrecio,
+        subtotal: sub,
+        iva: null, // reservado para facturación electrónica
+      });
+      updates.push({ ref: productoRefs[idx], stockPorDeposito, stockTotal, productoId: it.productoId, cantidad: it.cantidad });
+    });
+
+    const desc = Math.min(Math.max(Math.round(Number(descuento) || 0), 0), subtotal);
+    const total = subtotal - desc;
+
+    const pagosGuardados = pagos
+      .filter((x) => Number(x.monto) > 0)
+      .map((x) => ({ metodo: x.metodo, monto: Math.round(Number(x.monto)) }));
+    const sumaPagos = pagosGuardados.reduce((a, x) => a + x.monto, 0);
+    if (sumaPagos !== total) {
+      throw new Error(`Los pagos (${sumaPagos.toLocaleString("es-PY")}) no coinciden con el total (${total.toLocaleString("es-PY")}).`);
+    }
+    const credito = pagosGuardados.filter((x) => x.metodo === "credito").reduce((a, x) => a + x.monto, 0);
+    if (credito > 0 && !clienteRef) throw new Error("Una venta a crédito necesita un cliente (no puede ser consumidor final).");
+
+    updates.forEach((u) => {
+      tx.update(u.ref, {
+        stockPorDeposito: u.stockPorDeposito,
+        stockTotal: u.stockTotal,
+        actualizadoEn: firebase.firestore.FieldValue.serverTimestamp(),
+      });
+      siguienteMov += 1;
+      tx.set(db.collection("movimientosStock").doc(), {
+        codigoMovimiento: "M-" + String(siguienteMov).padStart(6, "0"),
+        tipo: "egreso",
+        productoId: u.productoId,
+        depositoOrigenId: depositoId,
+        depositoDestinoId: null,
+        cantidad: u.cantidad,
+        motivo: `Venta ${codigoVenta}`,
+        ventaId: ventaRef.id,
+        codigoVenta,
+        usuarioId,
+        usuarioNombre,
+        fecha: firebase.firestore.FieldValue.serverTimestamp(),
+      });
+    });
+
+    if (clienteRef && credito > 0) {
+      tx.update(clienteRef, {
+        saldoPendiente: (clienteDoc.data().saldoPendiente || 0) + credito,
+        actualizadoEn: firebase.firestore.FieldValue.serverTimestamp(),
+      });
+    }
+
+    const cd = clienteDoc ? clienteDoc.data() : null;
+    const venta = {
+      codigoVenta,
+      comprobante: { tipo: "ticket", numero: codigoVenta },
+      fiscal: null,   // reservado: datos SIFEN (CDC, timbrado, etc.)
+      cajaId: null,   // reservado: control de cajas
+      depositoId,
+      clienteId: clienteId || null,
+      clienteNombre: cd ? cd.nombre : "Consumidor final",
+      clienteDocumento: cd ? (cd.ruc || null) : null,
+      items: itemsGuardados,
+      totalItems: itemsGuardados.length,
+      subtotal,
+      descuento: desc,
+      total,
+      pagos: pagosGuardados,
+      condicion: credito > 0 ? "credito" : "contado",
+      saldoPendiente: credito,
+      estado: "emitida",
+      usuarioId,
+      usuarioNombre,
+    };
+
+    tx.set(contadorVentaRef, { ultimo: siguienteVenta }, { merge: true });
+    tx.set(contadorMovRef, { ultimo: siguienteMov }, { merge: true });
+    tx.set(ventaRef, { ...venta, fecha: firebase.firestore.FieldValue.serverTimestamp() });
+    resultado = { id: ventaRef.id, ...venta, fecha: null };
+  });
+
+  return resultado;
+}
+
+/** Ticket de 80 mm en PDF (descarga directa). */
+async function generarTicketPDF({ venta, empresaNombre, logoDataUrl, nombreDeposito }) {
+  const { jsPDF } = window.jspdf;
+  const W = 80;
+  const margen = 4;
+  const anchoUtil = W - margen * 2;
+  const alto = 70 + venta.items.length * 10 + (venta.pagos || []).length * 5;
+  const doc = new jsPDF({ unit: "mm", format: [W, alto] });
+  let y = 6;
+
+  if (logoDataUrl) {
+    const dims = await obtenerDimensionesImagen(logoDataUrl);
+    if (dims && dims.w > 0) {
+      const ancho = 26;
+      const h = ancho * (dims.h / dims.w);
+      const fmt = /^data:image\/jpe?g/i.test(logoDataUrl) ? "JPEG" : "PNG";
+      doc.addImage(logoDataUrl, fmt, (W - ancho) / 2, y, ancho, h);
+      y += h + 3;
+    }
+  }
+
+  doc.setFontSize(11);
+  doc.setFont(undefined, "bold");
+  doc.text(empresaNombre || "Ticket de venta", W / 2, y, { align: "center" });
+  y += 5;
+  doc.setFont(undefined, "normal");
+  doc.setFontSize(8);
+  doc.text(`Ticket ${venta.codigoVenta} (sin validez fiscal)`, W / 2, y, { align: "center" });
+  y += 4;
+  const fecha = venta.fecha && venta.fecha.toDate ? venta.fecha.toDate() : (venta.fechaLocal || new Date());
+  doc.text(fecha.toLocaleString("es-PY"), W / 2, y, { align: "center" });
+  y += 5;
+  doc.text(`Cliente: ${venta.clienteNombre || "Consumidor final"}`, margen, y); y += 4;
+  if (venta.clienteDocumento) { doc.text(`RUC/CI: ${venta.clienteDocumento}`, margen, y); y += 4; }
+  if (nombreDeposito) { doc.text(`Depósito: ${nombreDeposito}`, margen, y); y += 4; }
+  doc.text(`Atendió: ${venta.usuarioNombre || "—"}`, margen, y); y += 3;
+  doc.line(margen, y, W - margen, y); y += 4;
+
+  venta.items.forEach((it) => {
+    const lineas = doc.splitTextToSize(it.nombreProducto, anchoUtil);
+    doc.text(lineas, margen, y);
+    y += lineas.length * 3.6;
+    doc.text(`${it.cantidad} x ${Number(it.precioUnitario).toLocaleString("es-PY")}`, margen, y);
+    doc.text(Number(it.subtotal).toLocaleString("es-PY"), W - margen, y, { align: "right" });
+    y += 5;
+  });
+
+  doc.line(margen, y - 1, W - margen, y - 1); y += 3;
+  if (venta.descuento > 0) {
+    doc.text("Subtotal", margen, y); doc.text(Number(venta.subtotal).toLocaleString("es-PY"), W - margen, y, { align: "right" }); y += 4;
+    doc.text("Descuento", margen, y); doc.text("-" + Number(venta.descuento).toLocaleString("es-PY"), W - margen, y, { align: "right" }); y += 4;
+  }
+  doc.setFont(undefined, "bold");
+  doc.setFontSize(10);
+  doc.text("TOTAL Gs.", margen, y);
+  doc.text(Number(venta.total).toLocaleString("es-PY"), W - margen, y, { align: "right" });
+  y += 6;
+  doc.setFont(undefined, "normal");
+  doc.setFontSize(8);
+  (venta.pagos || []).forEach((p) => {
+    doc.text(METODOS_PAGO[p.metodo] || p.metodo, margen, y);
+    doc.text(Number(p.monto).toLocaleString("es-PY"), W - margen, y, { align: "right" });
+    y += 4;
+  });
+  if (venta.saldoPendiente > 0) {
+    doc.text(`Saldo a cobrar: Gs. ${Number(venta.saldoPendiente).toLocaleString("es-PY")}`, margen, y + 1);
+    y += 5;
+  }
+  doc.setFontSize(8);
+  doc.text("¡Gracias por su compra!", W / 2, y + 4, { align: "center" });
+  doc.save(`ticket-${venta.codigoVenta}.pdf`);
+}
+
+function PosBuscador({ productos, depositoId, onAgregar }) {
+  const [q, setQ] = useState("");
+  const texto = q.trim().toLowerCase();
+
+  const coincide = (p) =>
+    (p.nombre || "").toLowerCase().includes(texto) ||
+    (p.codigoInterno || "").toLowerCase().includes(texto) ||
+    (p.codigoBarraPrincipal || "").toLowerCase().includes(texto) ||
+    (p.codigosBarraAdicionales || []).some((c) => String(c).toLowerCase().includes(texto));
+
+  const resultados = texto
+    ? productos.filter((p) => p.activo !== false && coincide(p)).slice(0, 8)
+    : [];
+  const stockEn = (p) => (p.stockPorDeposito || {})[depositoId] || 0;
+
+  const agregar = (p) => { onAgregar(p); setQ(""); };
+
+  const onKeyDown = (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    if (!texto) return;
+    // Código de barra / interno exacto (lector de código de barras): se agrega directo.
+    const exacto = productos.find((p) =>
+      p.activo !== false && (
+        (p.codigoBarraPrincipal || "").toLowerCase() === texto ||
+        (p.codigoInterno || "").toLowerCase() === texto ||
+        (p.codigosBarraAdicionales || []).some((c) => String(c).toLowerCase() === texto)
+      )
+    );
+    if (exacto) return agregar(exacto);
+    if (resultados.length === 1) agregar(resultados[0]);
+  };
+
+  return (
+    <div>
+      <input
+        autoFocus
+        placeholder="Buscar por nombre, código o escanear código de barra..."
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        onKeyDown={onKeyDown}
+      />
+      {texto ? (
+        <div className="pos-resultados">
+          {resultados.length === 0 ? (
+            <div className="pos-resultado-vacio">Sin resultados.</div>
+          ) : resultados.map((p) => {
+            const st = stockEn(p);
+            const { precio } = precioUnitarioPara(p, 1);
+            return (
+              <button type="button" key={p.id} className="pos-resultado" disabled={st <= 0} onClick={() => agregar(p)}>
+                <span>
+                  <strong>{p.nombre}</strong>
+                  <small>{p.codigoInterno}{p.codigoBarraPrincipal ? ` · ${p.codigoBarraPrincipal}` : ""}</small>
+                </span>
+                <span style={{ textAlign: "right" }}>
+                  <strong>{precio != null ? formatoGs(precio) : "Sin precio"}</strong>
+                  <small>Stock: {st}</small>
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function PuntoVentaPage({ currentUid, currentUserName, role, empresaNombre, logoDataUrl }) {
+  const productos = useColeccionSimple("productos");
+  const depositos = useColeccionSimple("depositos");
+  const clientes = useColeccionSimple("clientes");
+
+  const [depositoId, setDepositoId] = useState("");
+  const [clienteId, setClienteId] = useState("");
+  const [carrito, setCarrito] = useState([]); // [{productoId, cantidad}]
+  const [descuento, setDescuento] = useState("");
+  const [pagos, setPagos] = useState([{ metodo: "efectivo", monto: "" }]);
+  const [recibido, setRecibido] = useState("");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [ultimaVenta, setUltimaVenta] = useState(null);
+
+  const puedeDescuento = hasActionAccess(role, "pos.descuento");
+  const depositosActivos = depositos.filter((d) => d.activo !== false);
+
+  useEffect(() => {
+    if (!depositoId && depositosActivos.length > 0) setDepositoId(depositosActivos[0].id);
+  }, [depositosActivos.length]);
+
+  const prod = (id) => productos.find((p) => p.id === id);
+  const stockEn = (p) => (p ? (p.stockPorDeposito || {})[depositoId] || 0 : 0);
+
+  const lineas = carrito.map((it) => {
+    const p = prod(it.productoId);
+    const cant = Number(it.cantidad) || 0;
+    const { precio, tipoPrecio } = p ? precioUnitarioPara(p, cant) : { precio: null, tipoPrecio: null };
+    return { ...it, p, cant, precio, tipoPrecio, sub: (precio || 0) * cant };
+  });
+  const subtotal = lineas.reduce((a, l) => a + l.sub, 0);
+  const desc = Math.min(Math.max(Math.round(Number(descuento) || 0), 0), subtotal);
+  const total = subtotal - desc;
+
+  // Con un único pago sin monto, se asume que paga el total.
+  const pagosEfectivos = pagos.length === 1 && pagos[0].monto === ""
+    ? [{ ...pagos[0], monto: total }]
+    : pagos.map((x) => ({ ...x, monto: Number(x.monto) || 0 }));
+  const sumaPagos = pagosEfectivos.reduce((a, x) => a + (Number(x.monto) || 0), 0);
+  const restante = total - sumaPagos;
+  const soloEfectivo = pagosEfectivos.length === 1 && pagosEfectivos[0].metodo === "efectivo";
+  const vuelto = soloEfectivo && recibido !== "" ? Number(recibido) - total : null;
+
+  const agregarProducto = (p) => {
+    setError("");
+    setCarrito((arr) => {
+      const i = arr.findIndex((x) => x.productoId === p.id);
+      if (i >= 0) return arr.map((x, idx) => (idx === i ? { ...x, cantidad: Number(x.cantidad) + 1 } : x));
+      return [...arr, { productoId: p.id, cantidad: 1 }];
+    });
+  };
+  const cambiarCantidad = (i, v) => setCarrito((arr) => arr.map((x, idx) => (idx === i ? { ...x, cantidad: v } : x)));
+  const quitar = (i) => setCarrito((arr) => arr.filter((_, idx) => idx !== i));
+  const cambiarPago = (i, campo, v) => setPagos((arr) => arr.map((x, idx) => (idx === i ? { ...x, [campo]: v } : x)));
+
+  const nuevaVenta = () => {
+    setCarrito([]); setDescuento(""); setPagos([{ metodo: "efectivo", monto: "" }]);
+    setRecibido(""); setClienteId(""); setError(""); setUltimaVenta(null);
+  };
+
+  const confirmar = async () => {
+    setError("");
+    if (!depositoId) return setError("Elegí el depósito desde donde se vende.");
+    if (carrito.length === 0) return setError("El carrito está vacío.");
+    for (const l of lineas) {
+      if (!(l.cant > 0) || !Number.isInteger(l.cant)) return setError(`Cantidad inválida en "${l.p ? l.p.nombre : "producto"}".`);
+      if (l.precio == null) return setError(`"${l.p.nombre}" no tiene precio cargado.`);
+      if (l.cant > stockEn(l.p)) return setError(`Stock insuficiente de "${l.p.nombre}" (hay ${stockEn(l.p)}).`);
+    }
+    if (restante !== 0) return setError(`Los pagos no coinciden con el total (${restante > 0 ? "faltan" : "sobran"} ${formatoGs(Math.abs(restante))}).`);
+    if (pagosEfectivos.some((x) => x.metodo === "credito" && x.monto > 0) && !clienteId) {
+      return setError("Para vender a crédito elegí un cliente.");
+    }
+    setSaving(true);
+    try {
+      const venta = await registrarVenta({
+        depositoId,
+        clienteId: clienteId || null,
+        items: lineas.map((l) => ({ productoId: l.productoId, cantidad: l.cant })),
+        descuento: desc,
+        pagos: pagosEfectivos,
+        usuarioId: currentUid,
+        usuarioNombre: currentUserName,
+      });
+      setUltimaVenta({ ...venta, fechaLocal: new Date() });
+    } catch (err) {
+      console.error(err);
+      setError(err.message || "No se pudo registrar la venta.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const nombreDeposito = (id) => (depositos.find((d) => d.id === id) || {}).nombre || "";
+
+  return (
+    <div>
+      <div className="page-header">
+        <div>
+          <h1>Punto de venta</h1>
+          <p>Escaneá o buscá productos, cobrá y descontá stock del depósito. Comprobante: ticket interno.</p>
+        </div>
+      </div>
+
+      {error ? <div className="form-error">{error}</div> : null}
+
+      <div className="pos-grid">
+        <div>
+          <div className="card">
+            <div className="card-body">
+              <div className="form-grid-2" style={{ marginBottom: 12 }}>
+                <div className="field" style={{ marginBottom: 0 }}>
+                  <label>Depósito (de dónde sale la mercadería)</label>
+                  <select value={depositoId} onChange={(e) => { setDepositoId(e.target.value); setCarrito([]); }}>
+                    {depositosActivos.map((d) => <option key={d.id} value={d.id}>{d.nombre}</option>)}
+                  </select>
+                </div>
+                <div className="field" style={{ marginBottom: 0 }}>
+                  <label>Cliente</label>
+                  <select value={clienteId} onChange={(e) => setClienteId(e.target.value)}>
+                    <option value="">Consumidor final</option>
+                    {clientes.filter((c) => c.activo !== false).map((c) => (
+                      <option key={c.id} value={c.id}>{c.nombre}{c.ruc ? ` · ${c.ruc}` : ""}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <PosBuscador productos={productos} depositoId={depositoId} onAgregar={agregarProducto} />
+            </div>
+          </div>
+
+          <div className="card">
+            <div className="table-scroll">
+              <table className="data-table">
+                <thead>
+                  <tr><th>Producto</th><th style={{ width: 90 }}>Cant.</th><th>Precio</th><th>Subtotal</th><th></th></tr>
+                </thead>
+                <tbody>
+                  {lineas.length === 0 ? (
+                    <tr><td colSpan={5} style={{ color: "var(--color-text-soft)" }}>El carrito está vacío.</td></tr>
+                  ) : lineas.map((l, i) => (
+                    <tr key={l.productoId}>
+                      <td>
+                        {l.p ? l.p.nombre : "(producto eliminado)"}
+                        <div style={{ fontSize: 11.5, color: "var(--color-text-soft)" }}>
+                          Stock: {stockEn(l.p)}{l.tipoPrecio === "mayorista" ? " · precio mayorista" : ""}
+                        </div>
+                      </td>
+                      <td>
+                        <input type="number" min="1" step="1" value={l.cantidad}
+                          onChange={(e) => cambiarCantidad(i, e.target.value)} style={{ width: 80 }} />
+                      </td>
+                      <td>{l.precio != null ? formatoGs(l.precio) : "Sin precio"}</td>
+                      <td>{formatoGs(l.sub)}</td>
+                      <td><button type="button" className="icon-btn" onClick={() => quitar(i)}>Quitar</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div className="card">
+            <div className="card-body">
+              <div className="pos-fila"><span>Subtotal</span><strong>{formatoGs(subtotal)}</strong></div>
+              {puedeDescuento ? (
+                <div className="field" style={{ margin: "8px 0" }}>
+                  <label>Descuento (Gs.)</label>
+                  <input type="number" min="0" step="1" value={descuento} onChange={(e) => setDescuento(e.target.value)} />
+                </div>
+              ) : null}
+              <div className="pos-total"><span>TOTAL</span><strong>{formatoGs(total)}</strong></div>
+
+              <h4 style={{ margin: "16px 0 8px" }}>Pagos</h4>
+              {pagos.map((x, i) => (
+                <div key={i} style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+                  <select value={x.metodo} onChange={(e) => cambiarPago(i, "metodo", e.target.value)} style={{ flex: 1 }}>
+                    {Object.entries(METODOS_PAGO).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                  </select>
+                  <input type="number" min="0" step="1" style={{ width: 120 }}
+                    placeholder={pagos.length === 1 ? String(total) : "Monto"}
+                    value={x.monto} onChange={(e) => cambiarPago(i, "monto", e.target.value)} />
+                  {pagos.length > 1 ? (
+                    <button type="button" className="icon-btn" onClick={() => setPagos((arr) => arr.filter((_, idx) => idx !== i))}>×</button>
+                  ) : null}
+                </div>
+              ))}
+              <button type="button" className="btn btn-secondary" style={{ width: "auto" }}
+                onClick={() => setPagos((arr) => [...(arr.length === 1 && arr[0].monto === "" ? [{ ...arr[0], monto: String(total) }] : arr), { metodo: "efectivo", monto: "" }])}>
+                + Dividir pago
+              </button>
+              {pagos.length > 1 ? (
+                <p style={{ fontSize: 12.5, margin: "8px 0 0", color: restante === 0 ? "var(--color-success)" : "var(--color-danger)" }}>
+                  {restante === 0 ? "Pagos completos." : restante > 0 ? `Falta cobrar ${formatoGs(restante)}` : `Sobran ${formatoGs(-restante)}`}
+                </p>
+              ) : null}
+
+              {soloEfectivo ? (
+                <div className="field" style={{ marginTop: 12 }}>
+                  <label>Efectivo recibido (opcional, para calcular vuelto)</label>
+                  <input type="number" min="0" step="1" value={recibido} onChange={(e) => setRecibido(e.target.value)} />
+                  {vuelto != null ? (
+                    <p style={{ margin: "6px 0 0", fontWeight: 600, color: vuelto >= 0 ? "inherit" : "var(--color-danger)" }}>
+                      {vuelto >= 0 ? `Vuelto: ${formatoGs(vuelto)}` : `Faltan ${formatoGs(-vuelto)}`}
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
+
+              <button type="button" className="btn btn-primary" style={{ marginTop: 16 }} disabled={saving || carrito.length === 0} onClick={confirmar}>
+                {saving ? "Registrando..." : `Cobrar ${formatoGs(total)}`}
+              </button>
+              <button type="button" className="btn btn-secondary" style={{ marginTop: 8 }} onClick={nuevaVenta}>Vaciar / nueva venta</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {ultimaVenta ? (
+        <div className="modal-backdrop">
+          <div className="modal">
+            <div className="modal-header"><h3>Venta registrada</h3></div>
+            <div className="modal-body">
+              <p style={{ marginTop: 0 }}>
+                <strong>{ultimaVenta.codigoVenta}</strong> · {formatoGs(ultimaVenta.total)}
+                {ultimaVenta.condicion === "credito" ? " · queda saldo a cobrar" : ""}
+              </p>
+              {vuelto != null && vuelto >= 0 && soloEfectivo ? <p>Vuelto: <strong>{formatoGs(vuelto)}</strong></p> : null}
+              <p style={{ fontSize: 12.5, color: "var(--color-text-soft)" }}>El stock ya se descontó.</p>
+            </div>
+            <div className="modal-footer">
+              <button type="button" className="btn btn-secondary" style={{ width: "auto" }}
+                onClick={() => generarTicketPDF({ venta: ultimaVenta, empresaNombre, logoDataUrl, nombreDeposito: nombreDeposito(ultimaVenta.depositoId) })}>
+                Imprimir ticket (PDF)
+              </button>
+              <button type="button" className="btn btn-primary" style={{ width: "auto" }} onClick={nuevaVenta}>Nueva venta</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function VentasPage({ empresaNombre, logoDataUrl }) {
+  const [ventas, setVentas] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [filtro, setFiltro] = useState("");
+  const [verDetalle, setVerDetalle] = useState(null);
+  const depositos = useColeccionSimple("depositos");
+
+  useEffect(() => {
+    const unsub = db.collection("ventas").orderBy("fecha", "desc").limit(200).onSnapshot(
+      (snap) => { setVentas(snap.docs.map((d) => ({ id: d.id, ...d.data() }))); setLoading(false); },
+      (err) => { console.error(err); setLoading(false); }
+    );
+    return () => unsub();
+  }, []);
+
+  const nombreDeposito = (id) => (depositos.find((d) => d.id === id) || {}).nombre || "—";
+  const visibles = filtro ? ventas.filter((v) => v.condicion === filtro) : ventas;
+  const totalVisible = visibles.reduce((a, v) => a + (v.total || 0), 0);
+
+  return (
+    <div>
+      <div className="page-header">
+        <div>
+          <h1>Ventas</h1>
+          <p>Historial de ventas emitidas (últimas 200). Cada venta es inmutable; una devolución se registrará como operación aparte.</p>
+        </div>
+      </div>
+      <div className="card">
+        <div className="card-body" style={{ paddingBottom: 0, display: "flex", gap: 16, alignItems: "flex-end", flexWrap: "wrap" }}>
+          <div className="field" style={{ maxWidth: 220 }}>
+            <label>Condición</label>
+            <select value={filtro} onChange={(e) => setFiltro(e.target.value)}>
+              <option value="">Todas</option>
+              <option value="contado">Contado</option>
+              <option value="credito">Crédito</option>
+            </select>
+          </div>
+          <p style={{ marginBottom: 16, fontWeight: 600 }}>{visibles.length} ventas · {formatoGs(totalVisible)}</p>
+        </div>
+        <div className="table-scroll">
+          <table className="data-table">
+            <thead>
+              <tr><th>Venta</th><th>Fecha</th><th>Cliente</th><th>Total</th><th>Condición</th><th>Usuario</th><th></th></tr>
+            </thead>
+            <tbody>
+              {loading ? (
+                <tr><td colSpan={7}>Cargando...</td></tr>
+              ) : visibles.length === 0 ? (
+                <tr><td colSpan={7} style={{ color: "var(--color-text-soft)" }}>Todavía no hay ventas.</td></tr>
+              ) : visibles.map((v) => (
+                <tr key={v.id}>
+                  <td>{v.codigoVenta}</td>
+                  <td>{v.fecha && v.fecha.toDate ? v.fecha.toDate().toLocaleString("es-PY") : "—"}</td>
+                  <td>{v.clienteNombre || "Consumidor final"}</td>
+                  <td>{formatoGs(v.total)}</td>
+                  <td>{v.condicion === "credito" ? `Crédito (saldo ${formatoGs(v.saldoPendiente)})` : "Contado"}</td>
+                  <td>{v.usuarioNombre || "—"}</td>
+                  <td><button className="icon-btn" onClick={() => setVerDetalle(v)}>Ver</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {verDetalle ? (
+        <div className="modal-backdrop" onClick={(e) => { if (e.target === e.currentTarget) setVerDetalle(null); }}>
+          <div className="modal">
+            <div className="modal-header">
+              <h3>{verDetalle.codigoVenta}</h3>
+              <button type="button" className="modal-close" onClick={() => setVerDetalle(null)}>×</button>
+            </div>
+            <div className="modal-body">
+              <p style={{ fontSize: 12.5, color: "var(--color-text-soft)", marginTop: 0 }}>
+                {verDetalle.clienteNombre} · {nombreDeposito(verDetalle.depositoId)}
+              </p>
+              <div className="table-scroll">
+                <table className="data-table">
+                  <thead><tr><th>Producto</th><th>Cant.</th><th>Precio</th><th>Subtotal</th></tr></thead>
+                  <tbody>
+                    {(verDetalle.items || []).map((it, i) => (
+                      <tr key={i}><td>{it.nombreProducto}</td><td>{it.cantidad}</td><td>{formatoGs(it.precioUnitario)}</td><td>{formatoGs(it.subtotal)}</td></tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {verDetalle.descuento > 0 ? <p style={{ textAlign: "right", margin: "8px 0 0" }}>Descuento: -{formatoGs(verDetalle.descuento)}</p> : null}
+              <p style={{ textAlign: "right", fontWeight: 600 }}>Total: {formatoGs(verDetalle.total)}</p>
+              <p style={{ fontSize: 12.5, margin: 0 }}>
+                {(verDetalle.pagos || []).map((p) => `${METODOS_PAGO[p.metodo] || p.metodo}: ${formatoGs(p.monto)}`).join(" · ")}
+              </p>
+            </div>
+            <div className="modal-footer">
+              <button type="button" className="btn btn-secondary" style={{ width: "auto" }}
+                onClick={() => generarTicketPDF({ venta: verDetalle, empresaNombre, logoDataUrl, nombreDeposito: nombreDeposito(verDetalle.depositoId) })}>
+                Reimprimir ticket (PDF)
+              </button>
+              <button type="button" className="btn btn-secondary" style={{ width: "auto" }} onClick={() => setVerDetalle(null)}>Cerrar</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Stock · Movimientos de stock (auditoría, solo lectura)               */
 /* Muestra el historial completo de movimientos generados por otras     */
 /* operaciones (por ahora, Traslado de mercadería; más adelante también */
@@ -3054,7 +3712,7 @@ function UsuarioFormModal({ initial, onClose, onSave }) {
 /* Router de contenido                                                  */
 /* ------------------------------------------------------------------ */
 
-function PageContent({ moduleKey, pageKey, currentUid, currentUserName, empresaNombre, logoDataUrl }) {
+function PageContent({ moduleKey, pageKey, currentUid, currentUserName, role, empresaNombre, logoDataUrl }) {
   if (moduleKey === "inicio") return <Dashboard />;
 
   const moduleDef = MENU.find((m) => m.key === moduleKey);
@@ -3073,6 +3731,36 @@ function PageContent({ moduleKey, pageKey, currentUid, currentUserName, empresaN
           { name: "email", label: "Email" },
           { name: "direccion", label: "Dirección" },
           { name: "condicionesPago", label: "Condiciones de pago" },
+        ]}
+      />
+    );
+  }
+
+  if (moduleKey === "facturacion" && pageKey === "pos") {
+    return (
+      <PuntoVentaPage
+        currentUid={currentUid} currentUserName={currentUserName} role={role}
+        empresaNombre={empresaNombre} logoDataUrl={logoDataUrl}
+      />
+    );
+  }
+
+  if (moduleKey === "facturacion" && pageKey === "ventas") {
+    return <VentasPage empresaNombre={empresaNombre} logoDataUrl={logoDataUrl} />;
+  }
+
+  if (moduleKey === "facturacion" && pageKey === "clientes") {
+    return (
+      <MaestroCRUD
+        collectionName="clientes"
+        title="Clientes"
+        description="Maestro de clientes. Se usa en el punto de venta (ventas a crédito y datos del comprobante) y, más adelante, en la factura electrónica."
+        fields={[
+          { name: "nombre", label: "Nombre / Razón social", required: true },
+          { name: "ruc", label: "RUC / C.I." },
+          { name: "telefono", label: "Teléfono" },
+          { name: "email", label: "Email" },
+          { name: "direccion", label: "Dirección" },
         ]}
       />
     );
@@ -3266,6 +3954,7 @@ function AppShell({ firebaseUser }) {
             pageKey={activePage}
             currentUid={firebaseUser.uid}
             currentUserName={userDoc?.nombre || firebaseUser.email}
+            role={role}
             empresaNombre={empresaNombre}
             logoDataUrl={logoDataUrl}
           />
