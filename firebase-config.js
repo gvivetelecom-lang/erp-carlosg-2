@@ -36,7 +36,7 @@ db.enablePersistence({ synchronizeTabs: true }).catch((err) => {
   console.warn("Persistencia offline no disponible:", err.code);
 });
 
-const APP_VERSION = "0.13.0";
+const APP_VERSION = "0.14.0";
 
 // Analytics (measurementId incluido en el proyecto) no se está usando en
 // esta app: es un sistema interno de gestión, no un sitio con visitantes

@@ -154,8 +154,22 @@ service cloud.firestore {
         resource.data.estado == 'emitida' &&
         request.resource.data.estado == 'anulada' &&
         request.resource.data.diff(resource.data).affectedKeys()
-          .hasOnly(['estado', 'saldoPendiente', 'motivoAnulacion', 'anuladaPorId', 'anuladaPorNombre', 'anuladaEn']);
+          .hasOnly(['estado', 'saldoPendiente', 'cobradoAlAnular', 'motivoAnulacion', 'anuladaPorId', 'anuladaPorNombre', 'anuladaEn']);
+      // Cobro de una venta a crédito: solo puede bajar el saldo pendiente.
+      allow update: if hasRole(['admin', 'gerencia', 'finanzas']) &&
+        resource.data.estado == 'emitida' &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['saldoPendiente', 'actualizadoEn']) &&
+        request.resource.data.saldoPendiente >= 0 &&
+        request.resource.data.saldoPendiente < resource.data.saldoPendiente;
       allow delete: if false;
+    }
+
+    match /cobros/{docId} {
+      // Cobro de ventas a crédito. Inmutable: una corrección sería un
+      // movimiento inverso, no una edición.
+      allow read: if hasRole(['admin', 'gerencia', 'finanzas']);
+      allow create: if hasRole(['admin', 'gerencia', 'finanzas']);
+      allow update, delete: if false;
     }
 
     match /movimientosFinancieros/{docId} {

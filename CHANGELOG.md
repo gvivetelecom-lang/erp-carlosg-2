@@ -3,6 +3,24 @@
 Versionado semántico informal: patch para correcciones, minor para
 nuevas funcionalidades (sección 17.2 de la especificación funcional).
 
+## [0.14.0] — Finanzas: Cuentas a cobrar
+
+### Agregado
+- Finanzas → Cuentas a cobrar: lista de clientes con saldo pendiente
+  (total a cobrar), y "Cobrar" por cliente: monto (por defecto todo el
+  saldo, o un cobro parcial), forma de pago y observaciones. El monto se
+  imputa automáticamente a las ventas a crédito más antiguas.
+- Cada cobro es un registro inmutable (CB-000001, contador atómico) y, en
+  la misma transacción, baja el saldo de las ventas y del cliente y
+  genera un movimiento financiero de ingreso (base para Bancos/Finanzas).
+- Recibo de cobro en A4 (PDF, sin validez fiscal) al cobrar y desde el
+  historial "Últimos cobros".
+- Al anular una venta a crédito que ya tuvo cobros, el sistema avisa que
+  ese dinero hay que devolverlo al cliente aparte y lo registra en la
+  venta (`cobradoAlAnular`).
+- Reglas: nueva colección `cobros` (admin/gerencia/finanzas, inmutable);
+  `ventas` admite una actualización que solo reduce `saldoPendiente`.
+
 ## [0.13.0] — Anulación de ventas
 
 ### Agregado

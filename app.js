@@ -97,7 +97,7 @@ const MENU = [
     key: "finanzas", label: "Finanzas", icon: "FI",
     children: [
       { key: "bancos", label: "Bancos", soon: true },
-      { key: "cuentas-cobrar", label: "Cuentas a cobrar", soon: true },
+      { key: "cuentas-cobrar", label: "Cuentas a cobrar" },
       { key: "pagos", label: "Pagos a proveedores", soon: true },
     ],
   },
@@ -3238,9 +3238,12 @@ async function anularVenta({ ventaId, motivo, usuarioId, usuarioNombre }) {
     }
 
     tx.set(contadorMovRef, { ultimo: siguienteMov }, { merge: true });
+    const creditoOriginal = (v.pagos || []).filter((p) => p.metodo === "credito").reduce((a, p) => a + p.monto, 0);
+    const cobradoAlAnular = Math.max(creditoOriginal - (v.saldoPendiente || 0), 0);
     tx.update(ventaRef, {
       estado: "anulada",
       saldoPendiente: 0,
+      cobradoAlAnular,
       motivoAnulacion: motivo,
       anuladaPorId: usuarioId,
       anuladaPorNombre: usuarioNombre,
@@ -3382,6 +3385,15 @@ function VentasPage({ empresaNombre, logoDataUrl, role, currentUid, currentUserN
                   <p style={{ fontSize: 11.5, color: "var(--color-text-soft)", margin: "6px 0 0" }}>
                     Devuelve el stock al depósito y descuenta el crédito del cliente. No se puede deshacer.
                   </p>
+                  {(() => {
+                    const cred = (verDetalle.pagos || []).filter((p) => p.metodo === "credito").reduce((a, p) => a + p.monto, 0);
+                    const cobrado = cred - (verDetalle.saldoPendiente || 0);
+                    return cobrado > 0 ? (
+                      <p style={{ fontSize: 12, color: "var(--color-danger)", margin: "6px 0 0" }}>
+                        Atención: ya se cobraron {formatoGs(cobrado)} de esta venta. Esa plata hay que devolverla al cliente aparte; queda registrada en la venta.
+                      </p>
+                    ) : null;
+                  })()}
                   {errorAnular ? <div className="form-error" style={{ marginTop: 8 }}>{errorAnular}</div> : null}
                 </div>
               ) : null}
@@ -3405,6 +3417,406 @@ function VentasPage({ empresaNombre, logoDataUrl, role, currentUid, currentUserN
                 )
               ) : null}
               <button type="button" className="btn btn-secondary" style={{ width: "auto" }} onClick={cerrarDetalle}>Cerrar</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {toast ? <div className="toast">{toast}</div> : null}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Finanzas · Cuentas a cobrar                                          */
+/* Cobro de ventas a crédito. Cada cobro es un registro inmutable       */
+/* (CB-000001) que se imputa a las ventas pendientes del cliente,       */
+/* de la más antigua a la más nueva, y genera un movimiento financiero. */
+/* ------------------------------------------------------------------ */
+
+const METODOS_COBRO = { efectivo: "Efectivo", transferencia: "Transferencia", tarjeta: "Tarjeta", cheque: "Cheque" };
+
+/** Reparte un monto entre las ventas (ya ordenadas de más antigua a más nueva). */
+function imputarCobro(ventasPendientes, monto) {
+  let resto = Math.round(Number(monto) || 0);
+  const imputaciones = [];
+  for (const v of ventasPendientes) {
+    if (resto <= 0) break;
+    const aplicar = Math.min(resto, v.saldoPendiente || 0);
+    if (aplicar > 0) {
+      imputaciones.push({ ventaId: v.id, codigoVenta: v.codigoVenta, monto: aplicar });
+      resto -= aplicar;
+    }
+  }
+  return { imputaciones, sobrante: resto };
+}
+
+async function registrarCobro({ clienteId, monto, metodo, observaciones, imputaciones, usuarioId, usuarioNombre }) {
+  const montoTotal = imputaciones.reduce((a, x) => a + x.monto, 0);
+  if (!(montoTotal > 0)) throw new Error("El monto a cobrar debe ser mayor a 0.");
+
+  const contadorRef = db.collection("contadores").doc("cobros");
+  const clienteRef = db.collection("clientes").doc(clienteId);
+  const cobroRef = db.collection("cobros").doc();
+  const movRef = db.collection("movimientosFinancieros").doc();
+  const ventaRefs = imputaciones.map((x) => db.collection("ventas").doc(x.ventaId));
+  let resultado = null;
+
+  await db.runTransaction(async (tx) => {
+    const clienteDoc = await tx.get(clienteRef);
+    const ventaDocs = await Promise.all(ventaRefs.map((r) => tx.get(r)));
+    const contadorDoc = await tx.get(contadorRef);
+
+    if (!clienteDoc.exists) throw new Error("El cliente ya no existe.");
+    ventaDocs.forEach((vd, i) => {
+      if (!vd.exists) throw new Error("Una de las ventas ya no existe.");
+      const v = vd.data();
+      if (v.estado !== "emitida") throw new Error(`La venta ${v.codigoVenta} fue anulada. Cerrá y volvé a abrir el cobro.`);
+      if ((v.saldoPendiente || 0) < imputaciones[i].monto) {
+        throw new Error(`La venta ${v.codigoVenta} ya no tiene ese saldo (otro cobro se registró). Cerrá y volvé a abrir el cobro.`);
+      }
+    });
+
+    const siguiente = (contadorDoc.exists ? contadorDoc.data().ultimo || 0 : 0) + 1;
+    const codigoCobro = "CB-" + String(siguiente).padStart(6, "0");
+
+    ventaDocs.forEach((vd, i) => {
+      tx.update(ventaRefs[i], {
+        saldoPendiente: (vd.data().saldoPendiente || 0) - imputaciones[i].monto,
+        actualizadoEn: firebase.firestore.FieldValue.serverTimestamp(),
+      });
+    });
+    tx.update(clienteRef, {
+      saldoPendiente: Math.max((clienteDoc.data().saldoPendiente || 0) - montoTotal, 0),
+      actualizadoEn: firebase.firestore.FieldValue.serverTimestamp(),
+    });
+
+    const cobro = {
+      codigoCobro,
+      clienteId,
+      clienteNombre: clienteDoc.data().nombre,
+      clienteDocumento: clienteDoc.data().ruc || null,
+      monto: montoTotal,
+      metodo,
+      observaciones: observaciones || null,
+      imputaciones,
+      usuarioId,
+      usuarioNombre,
+    };
+    tx.set(contadorRef, { ultimo: siguiente }, { merge: true });
+    tx.set(cobroRef, { ...cobro, fecha: firebase.firestore.FieldValue.serverTimestamp() });
+    tx.set(movRef, {
+      tipo: "ingreso",
+      origen: "cobro",
+      cobroId: cobroRef.id,
+      codigoCobro,
+      clienteId,
+      concepto: `Cobro ${codigoCobro} · ${clienteDoc.data().nombre}`,
+      monto: montoTotal,
+      metodo,
+      usuarioId,
+      usuarioNombre,
+      fecha: firebase.firestore.FieldValue.serverTimestamp(),
+    });
+    resultado = { id: cobroRef.id, ...cobro, fecha: null };
+  });
+  return resultado;
+}
+
+/** Recibo de cobro en A4 (documento interno, sin validez fiscal). */
+async function generarReciboCobroPDF({ cobro }) {
+  let empresa = {};
+  try {
+    const cfg = await db.collection("configuracion").doc("general").get();
+    if (cfg.exists) empresa = cfg.data();
+  } catch (e) { console.warn(e); }
+
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: "mm", format: "a4" });
+  const L = 10, R = 200, ANCHO = R - L;
+  const nf = (v) => Number(v || 0).toLocaleString("es-PY");
+  const fecha = cobro.fecha && cobro.fecha.toDate ? cobro.fecha.toDate() : (cobro.fechaLocal || new Date());
+  const p2 = (x) => String(x).padStart(2, "0");
+  const fechaTxt = `${p2(fecha.getDate())}/${p2(fecha.getMonth() + 1)}/${fecha.getFullYear()} ${p2(fecha.getHours())}:${p2(fecha.getMinutes())}`;
+
+  doc.setLineWidth(0.3);
+  doc.rect(L, 10, ANCHO, 6);
+  doc.setFont(undefined, "bold");
+  doc.setFontSize(8.5);
+  doc.text("RECIBO DE COBRO — DOCUMENTO INTERNO SIN VALIDEZ FISCAL", (L + R) / 2, 14.2, { align: "center" });
+
+  doc.rect(L, 16, ANCHO, 34);
+  doc.line(135, 16, 135, 50);
+  let y = 22;
+  if (empresa.logoDataUrl) {
+    const dims = await obtenerDimensionesImagen(empresa.logoDataUrl);
+    if (dims && dims.w > 0) {
+      let w = 34; let h = w * (dims.h / dims.w);
+      if (h > 14) { h = 14; w = h * (dims.w / dims.h); }
+      doc.addImage(empresa.logoDataUrl, /^data:image\/jpe?g/i.test(empresa.logoDataUrl) ? "JPEG" : "PNG", L + 3, 19, w, h);
+      y = 19 + h + 4;
+    }
+  }
+  doc.setFontSize(10);
+  doc.text(empresa.empresaNombre || "", L + 3, y);
+  doc.setFont(undefined, "normal");
+  doc.setFontSize(8);
+  [empresa.empresaRuc ? `RUC: ${empresa.empresaRuc}` : "", empresa.empresaTelefono || "", empresa.empresaEmail || ""]
+    .filter(Boolean).forEach((t, i) => doc.text(t, L + 3, y + 4 + i * 3.6));
+  doc.setFont(undefined, "bold");
+  doc.setFontSize(12);
+  doc.text("RECIBO DE COBRO", 139, 28);
+  doc.text(cobro.codigoCobro, 139, 35);
+  doc.setFontSize(8.5);
+  doc.setFont(undefined, "normal");
+  doc.text(fechaTxt, 139, 42);
+
+  doc.rect(L, 52, ANCHO, 30);
+  doc.setFontSize(9);
+  const fila = (etq, val, yy) => {
+    doc.setFont(undefined, "bold"); doc.text(etq, L + 3, yy);
+    doc.setFont(undefined, "normal"); doc.text(String(val), L + 3 + 34, yy);
+  };
+  fila("Recibimos de:", cobro.clienteNombre || "—", 59);
+  fila("RUC / C.I.:", cobro.clienteDocumento || "—", 65);
+  fila("Forma de pago:", METODOS_COBRO[cobro.metodo] || cobro.metodo, 71);
+  doc.setFont(undefined, "bold"); doc.text("La suma de:", L + 3, 77);
+  doc.setFont(undefined, "normal");
+  const letras = "Guaraníes " + numeroALetras(cobro.monto) + ".";
+  doc.text(doc.splitTextToSize(letras.charAt(0).toUpperCase() + letras.slice(1), ANCHO - 44)[0], L + 3 + 34, 77);
+
+  doc.autoTable({
+    startY: 85,
+    head: [["Venta", "Monto imputado"]],
+    body: (cobro.imputaciones || []).map((x) => [x.codigoVenta, nf(x.monto)]),
+    foot: [["TOTAL COBRADO (Gs.)", nf(cobro.monto)]],
+    theme: "grid",
+    margin: { left: L, right: 210 - R },
+    styles: { fontSize: 9, cellPadding: 1.8, lineColor: [0, 0, 0], lineWidth: 0.2, textColor: 0 },
+    headStyles: { fillColor: [235, 235, 235], textColor: 0, fontStyle: "bold" },
+    footStyles: { fillColor: [245, 245, 245], textColor: 0, fontStyle: "bold" },
+    columnStyles: { 1: { halign: "right" } },
+  });
+  let yf = doc.lastAutoTable.finalY + 6;
+  if (cobro.observaciones) {
+    doc.setFontSize(8.5);
+    doc.text(doc.splitTextToSize(`Observaciones: ${cobro.observaciones}`, ANCHO), L, yf);
+    yf += 8;
+  }
+  yf = Math.max(yf + 22, 130);
+  doc.line(L + 10, yf, L + 75, yf);
+  doc.line(R - 75, yf, R - 10, yf);
+  doc.setFontSize(8.5);
+  doc.text("Firma y aclaración del cliente", L + 42.5, yf + 4, { align: "center" });
+  doc.text(`Recibió: ${cobro.usuarioNombre || "—"}`, R - 42.5, yf + 4, { align: "center" });
+  doc.setFontSize(7.5);
+  doc.text("Documento interno de control de cobranzas. No reemplaza a un recibo fiscal.", L, 291);
+  doc.save(`recibo-${cobro.codigoCobro}.pdf`);
+}
+
+function CobroModal({ cliente, usuarioId, usuarioNombre, onClose, onListo }) {
+  const [ventas, setVentas] = useState(null); // null = cargando
+  const [monto, setMonto] = useState("");
+  const [metodo, setMetodo] = useState("efectivo");
+  const [observaciones, setObservaciones] = useState("");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    db.collection("ventas").where("clienteId", "==", cliente.id).where("condicion", "==", "credito").get()
+      .then((snap) => {
+        const lista = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
+          .filter((v) => v.estado === "emitida" && (v.saldoPendiente || 0) > 0)
+          .sort((a, b) => ((a.fecha && a.fecha.seconds) || 0) - ((b.fecha && b.fecha.seconds) || 0));
+        setVentas(lista);
+        setMonto(String(lista.reduce((a, v) => a + v.saldoPendiente, 0)));
+      })
+      .catch((err) => { console.error(err); setVentas([]); setError("No se pudieron leer las ventas del cliente."); });
+  }, [cliente.id]);
+
+  const totalPendiente = (ventas || []).reduce((a, v) => a + v.saldoPendiente, 0);
+  const { imputaciones, sobrante } = imputarCobro(ventas || [], monto);
+  const montoNum = Math.round(Number(monto) || 0);
+
+  const confirmar = async () => {
+    setError("");
+    if (!(montoNum > 0)) return setError("Ingresá el monto a cobrar.");
+    if (sobrante > 0) return setError(`El monto supera el saldo pendiente (${formatoGs(totalPendiente)}).`);
+    setSaving(true);
+    try {
+      const cobro = await registrarCobro({
+        clienteId: cliente.id, monto: montoNum, metodo, observaciones, imputaciones, usuarioId, usuarioNombre,
+      });
+      onListo({ ...cobro, fechaLocal: new Date() });
+    } catch (err) {
+      console.error(err);
+      setError(err.message || "No se pudo registrar el cobro.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="modal">
+        <div className="modal-header">
+          <h3>Cobrar a {cliente.nombre}</h3>
+          <button type="button" className="modal-close" onClick={onClose}>×</button>
+        </div>
+        <div className="modal-body">
+          {error ? <div className="form-error">{error}</div> : null}
+          {ventas === null ? <p>Cargando...</p> : ventas.length === 0 ? (
+            <p style={{ color: "var(--color-text-soft)" }}>Este cliente no tiene ventas a crédito pendientes.</p>
+          ) : (
+            <>
+              <div className="table-scroll">
+                <table className="data-table">
+                  <thead><tr><th>Venta</th><th>Fecha</th><th>Saldo</th><th>Se cobra</th></tr></thead>
+                  <tbody>
+                    {ventas.map((v) => {
+                      const ap = imputaciones.find((x) => x.ventaId === v.id);
+                      return (
+                        <tr key={v.id}>
+                          <td>{v.codigoVenta}</td>
+                          <td>{v.fecha && v.fecha.toDate ? v.fecha.toDate().toLocaleDateString("es-PY") : "—"}</td>
+                          <td>{formatoGs(v.saldoPendiente)}</td>
+                          <td>{ap ? formatoGs(ap.monto) : "—"}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <p style={{ fontSize: 12, color: "var(--color-text-soft)" }}>El cobro se aplica primero a las ventas más antiguas.</p>
+              <div className="form-grid-2">
+                <div className="field">
+                  <label>Monto a cobrar (Gs.) — pendiente {formatoGs(totalPendiente)}</label>
+                  <input type="number" min="1" step="1" value={monto} onChange={(e) => setMonto(e.target.value)} />
+                </div>
+                <div className="field">
+                  <label>Forma de pago</label>
+                  <select value={metodo} onChange={(e) => setMetodo(e.target.value)}>
+                    {Object.entries(METODOS_COBRO).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                  </select>
+                </div>
+              </div>
+              <div className="field">
+                <label>Observaciones (opcional)</label>
+                <input value={observaciones} onChange={(e) => setObservaciones(e.target.value)} placeholder="Ej: N° de transferencia, cheque..." />
+              </div>
+            </>
+          )}
+        </div>
+        <div className="modal-footer">
+          <button type="button" className="btn btn-secondary" style={{ width: "auto" }} onClick={onClose}>Cancelar</button>
+          {ventas && ventas.length > 0 ? (
+            <button type="button" className="btn btn-primary" style={{ width: "auto" }} disabled={saving} onClick={confirmar}>
+              {saving ? "Registrando..." : `Registrar cobro ${formatoGs(montoNum)}`}
+            </button>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CuentasCobrarPage({ currentUid, currentUserName }) {
+  const clientes = useColeccionSimple("clientes");
+  const [cobros, setCobros] = useState([]);
+  const [cobrando, setCobrando] = useState(null);
+  const [recienCobrado, setRecienCobrado] = useState(null);
+  const [toast, setToast] = useState("");
+
+  useEffect(() => {
+    const unsub = db.collection("cobros").orderBy("fecha", "desc").limit(100).onSnapshot(
+      (snap) => setCobros(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+      (err) => console.error(err)
+    );
+    return () => unsub();
+  }, []);
+
+  const deudores = clientes
+    .filter((c) => (c.saldoPendiente || 0) > 0)
+    .sort((a, b) => b.saldoPendiente - a.saldoPendiente);
+  const totalPendiente = deudores.reduce((a, c) => a + c.saldoPendiente, 0);
+
+  return (
+    <div>
+      <div className="page-header">
+        <div>
+          <h1>Cuentas a cobrar</h1>
+          <p>Clientes con ventas a crédito pendientes. Cada cobro se aplica a las ventas más antiguas y genera un recibo.</p>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="card-body" style={{ paddingBottom: 0 }}>
+          <p style={{ margin: 0, fontWeight: 600 }}>Total a cobrar: {formatoGs(totalPendiente)} · {deudores.length} clientes</p>
+        </div>
+        <div className="table-scroll">
+          <table className="data-table">
+            <thead><tr><th>Cliente</th><th>RUC / C.I.</th><th>Teléfono</th><th>Saldo pendiente</th><th></th></tr></thead>
+            <tbody>
+              {deudores.length === 0 ? (
+                <tr><td colSpan={5} style={{ color: "var(--color-text-soft)" }}>No hay saldos pendientes.</td></tr>
+              ) : deudores.map((c) => (
+                <tr key={c.id}>
+                  <td>{c.nombre}</td>
+                  <td>{c.ruc || "—"}</td>
+                  <td>{c.telefono || "—"}</td>
+                  <td>{formatoGs(c.saldoPendiente)}</td>
+                  <td><button className="icon-btn" onClick={() => setCobrando(c)}>Cobrar</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="card-header"><h3>Últimos cobros</h3></div>
+        <div className="table-scroll">
+          <table className="data-table">
+            <thead><tr><th>Cobro</th><th>Fecha</th><th>Cliente</th><th>Forma</th><th>Monto</th><th>Ventas</th><th></th></tr></thead>
+            <tbody>
+              {cobros.length === 0 ? (
+                <tr><td colSpan={7} style={{ color: "var(--color-text-soft)" }}>Todavía no hay cobros.</td></tr>
+              ) : cobros.map((c) => (
+                <tr key={c.id}>
+                  <td>{c.codigoCobro}</td>
+                  <td>{c.fecha && c.fecha.toDate ? c.fecha.toDate().toLocaleString("es-PY") : "—"}</td>
+                  <td>{c.clienteNombre}</td>
+                  <td>{METODOS_COBRO[c.metodo] || c.metodo}</td>
+                  <td>{formatoGs(c.monto)}</td>
+                  <td>{(c.imputaciones || []).map((x) => x.codigoVenta).join(", ")}</td>
+                  <td><button className="icon-btn" onClick={() => generarReciboCobroPDF({ cobro: c })}>Recibo</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {cobrando ? (
+        <CobroModal
+          cliente={cobrando}
+          usuarioId={currentUid}
+          usuarioNombre={currentUserName}
+          onClose={() => setCobrando(null)}
+          onListo={(cobro) => { setCobrando(null); setRecienCobrado(cobro); }}
+        />
+      ) : null}
+
+      {recienCobrado ? (
+        <div className="modal-backdrop">
+          <div className="modal">
+            <div className="modal-header"><h3>Cobro registrado</h3></div>
+            <div className="modal-body">
+              <p style={{ marginTop: 0 }}><strong>{recienCobrado.codigoCobro}</strong> · {formatoGs(recienCobrado.monto)} · {recienCobrado.clienteNombre}</p>
+            </div>
+            <div className="modal-footer">
+              <button type="button" className="btn btn-secondary" style={{ width: "auto" }} onClick={() => generarReciboCobroPDF({ cobro: recienCobrado })}>Imprimir recibo</button>
+              <button type="button" className="btn btn-primary" style={{ width: "auto" }} onClick={() => setRecienCobrado(null)}>Listo</button>
             </div>
           </div>
         </div>
@@ -4150,6 +4562,10 @@ function PageContent({ moduleKey, pageKey, currentUid, currentUserName, role, em
         ]}
       />
     );
+  }
+
+  if (moduleKey === "finanzas" && pageKey === "cuentas-cobrar") {
+    return <CuentasCobrarPage currentUid={currentUid} currentUserName={currentUserName} />;
   }
 
   if (moduleKey === "facturacion" && pageKey === "pos") {
