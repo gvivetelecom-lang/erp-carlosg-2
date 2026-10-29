@@ -3,6 +3,27 @@
 Versionado semántico informal: patch para correcciones, minor para
 nuevas funcionalidades (sección 17.2 de la especificación funcional).
 
+## [0.16.0] — IVA por producto y liquidación en ventas
+
+### Agregado
+- Productos: nuevo campo IVA (10 %, 5 % o Exenta). Por defecto 10 %; los
+  productos existentes sin dato se tratan como 10 %. Los precios de
+  venta incluyen el IVA. Columna IVA en la lista y en las exportaciones
+  a Excel y PDF.
+- Ventas: cada ítem guarda su tasa (`ivaTasa`) y la venta guarda la
+  liquidación (`liquidacionIva`: exentas, gravadas y IVA 5 %, gravadas e
+  IVA 10 %, total IVA). El descuento se reparte proporcionalmente entre
+  los ítems antes de calcular el IVA (10 % = neto/11, 5 % = neto/21).
+- Comprobante A4: columnas de valor de venta Exentas / 5 % / 10 %, fila
+  de subtotales por tasa y liquidación del IVA con total IVA. El ticket
+  de 80 mm y el detalle en Ventas también muestran el IVA.
+- Las ventas anteriores a esta versión se calculan como 10 % al imprimir.
+
+### Cambiado
+- El campo reservado `iva: null` por ítem se reemplazó por `ivaTasa`.
+  Los campos de facturación electrónica (SIFEN) siguen sin implementarse
+  (`fiscal: null` queda reservado en la venta).
+
 ## [0.15.0] — Dashboard con datos reales
 
 ### Agregado

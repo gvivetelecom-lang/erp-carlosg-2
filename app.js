@@ -813,6 +813,7 @@ function exportarProductosExcel({ items, marcas, lineas, categorias }) {
     "Precio mayorista (Gs.)": p.precioMayorista != null ? Number(p.precioMayorista) : "",
     "Cantidad mayorista": p.cantidadMayorista != null ? Number(p.cantidadMayorista) : "",
     "Precio minorista (Gs.)": p.precioMinorista != null ? Number(p.precioMinorista) : "",
+    "IVA": tasaIvaDe(p) === 0 ? "Exenta" : tasaIvaDe(p) + "%",
     "Stock": p.stockTotal != null ? Number(p.stockTotal) : 0,
     "Estado": p.activo ? "Activo" : "Inactivo",
   }));
@@ -870,13 +871,14 @@ async function exportarProductosPDF({ items, marcas, lineas, categorias, empresa
     formatearGsPdf(p.precioMayorista),
     p.cantidadMayorista != null ? p.cantidadMayorista : "",
     formatearGsPdf(p.precioMinorista),
+    tasaIvaDe(p) === 0 ? "Exenta" : tasaIvaDe(p) + "%",
     p.stockTotal != null ? p.stockTotal : 0,
     p.activo ? "Activo" : "Inactivo",
   ]);
 
   doc.autoTable({
     startY: y + 22,
-    head: [["Código", "Nombre / Descripción", "Cód. barra", "Marca", "Línea", "Categoría", "P. mayorista", "Cant. may.", "P. minorista", "Stock", "Estado"]],
+    head: [["Código", "Nombre / Descripción", "Cód. barra", "Marca", "Línea", "Categoría", "P. mayorista", "Cant. may.", "P. minorista", "IVA", "Stock", "Estado"]],
     body: filas,
     styles: { fontSize: 7.5, cellPadding: 2 },
     headStyles: { fillColor: [156, 59, 87], textColor: 255 },
@@ -1000,6 +1002,7 @@ function ProductosPage({ empresaNombre, logoDataUrl }) {
                 <th>Precio mayorista</th>
                 <th>Cant. mayorista</th>
                 <th>Precio minorista</th>
+                <th>IVA</th>
                 <th>Stock</th>
                 <th>Estado</th>
                 <th></th>
@@ -1007,9 +1010,9 @@ function ProductosPage({ empresaNombre, logoDataUrl }) {
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={13}>Cargando...</td></tr>
+                <tr><td colSpan={14}>Cargando...</td></tr>
               ) : items.length === 0 ? (
-                <tr><td colSpan={13} style={{ color: "var(--color-text-soft)" }}>
+                <tr><td colSpan={14} style={{ color: "var(--color-text-soft)" }}>
                   Todavía no hay productos. Usá "+ Nuevo" para crear el primero
                   {marcas.length === 0 ? " (necesitás al menos una marca cargada)." : "."}
                 </td></tr>
@@ -1038,6 +1041,7 @@ function ProductosPage({ empresaNombre, logoDataUrl }) {
                   <td>{formatearGs(p.precioMayorista)}</td>
                   <td>{p.cantidadMayorista != null ? p.cantidadMayorista : "—"}</td>
                   <td>{formatearGs(p.precioMinorista)}</td>
+                  <td>{tasaIvaDe(p) === 0 ? "Exenta" : tasaIvaDe(p) + "%"}</td>
                   <td>{p.stockTotal != null ? p.stockTotal : 0}</td>
                   <td>
                     <span className={"status-pill " + (p.activo ? "active" : "inactive")}>
@@ -1089,6 +1093,7 @@ function ProductoFormModal({ initial, marcas, lineas, categorias, onClose, onSav
   const [precioMayorista, setPrecioMayorista] = useState(initial.precioMayorista != null ? String(initial.precioMayorista) : "");
   const [cantidadMayorista, setCantidadMayorista] = useState(initial.cantidadMayorista != null ? String(initial.cantidadMayorista) : "");
   const [precioMinorista, setPrecioMinorista] = useState(initial.precioMinorista != null ? String(initial.precioMinorista) : "");
+  const [tasaIva, setTasaIva] = useState(String(initial.tasaIva != null ? initial.tasaIva : 10));
   const [saving, setSaving] = useState(false);
 
   const agregarCodigoAdicional = () => setCodigosAdicionales((arr) => [...arr, ""]);
@@ -1132,6 +1137,7 @@ function ProductoFormModal({ initial, marcas, lineas, categorias, onClose, onSav
       precioMayorista: precioMayorista === "" ? null : Number(precioMayorista),
       cantidadMayorista: cantidadMayorista === "" ? null : Number(cantidadMayorista),
       precioMinorista: precioMinorista === "" ? null : Number(precioMinorista),
+      tasaIva: Number(tasaIva),
     };
     if (imagenNueva) {
       payload.imagenDataUrl = imagenNueva;
@@ -1254,6 +1260,17 @@ function ProductoFormModal({ initial, marcas, lineas, categorias, onClose, onSav
                 type="number" min="0" step="1"
                 value={precioMinorista} onChange={(e) => setPrecioMinorista(e.target.value)}
               />
+            </div>
+            <div className="field">
+              <label>IVA</label>
+              <select value={tasaIva} onChange={(e) => setTasaIva(e.target.value)}>
+                <option value="10">10 %</option>
+                <option value="5">5 %</option>
+                <option value="0">Exenta</option>
+              </select>
+              <p style={{ fontSize: 11.5, color: "var(--color-text-faint)", margin: "4px 0 0" }}>
+                Los precios de venta incluyen el IVA.
+              </p>
             </div>
           </div>
           <div className="modal-footer">
@@ -2513,6 +2530,40 @@ const METODOS_PAGO = {
   credito: "Crédito (a cobrar)",
 };
 
+/** Tasa de IVA del producto (10 si todavía no se cargó). 0 = exenta. */
+function tasaIvaDe(producto) {
+  const t = producto && producto.tasaIva;
+  return t === 0 || t === 5 || t === 10 ? t : 10;
+}
+
+/**
+ * Liquidación del IVA de una venta. Los precios ya incluyen IVA.
+ * El descuento se reparte proporcionalmente entre los ítems y el IVA se
+ * calcula sobre el neto de cada tasa (10% -> neto/11, 5% -> neto/21).
+ */
+function calcularLiquidacionIva(items, descuento) {
+  const subtotal = items.reduce((a, it) => a + (it.subtotal || 0), 0);
+  const desc = Math.min(Math.max(Math.round(Number(descuento) || 0), 0), subtotal);
+  let repartido = 0;
+  const netoPorTasa = { 0: 0, 5: 0, 10: 0 };
+  items.forEach((it, i) => {
+    const tasa = it.ivaTasa === 0 || it.ivaTasa === 5 ? it.ivaTasa : 10;
+    const parte = i === items.length - 1 ? desc - repartido : Math.floor(subtotal ? (desc * it.subtotal) / subtotal : 0);
+    repartido += parte;
+    netoPorTasa[tasa] += (it.subtotal || 0) - parte;
+  });
+  const iva10 = Math.round(netoPorTasa[10] / 11);
+  const iva5 = Math.round(netoPorTasa[5] / 21);
+  return {
+    exenta: netoPorTasa[0],
+    gravada5: netoPorTasa[5] - iva5,
+    iva5,
+    gravada10: netoPorTasa[10] - iva10,
+    iva10,
+    totalIva: iva5 + iva10,
+  };
+}
+
 /** Precio unitario según cantidad: mayorista si llega al mínimo, si no minorista. */
 function precioUnitarioPara(producto, cantidad) {
   const may = producto.precioMayorista;
@@ -2581,7 +2632,7 @@ async function registrarVenta({
         precioUnitario: precio,
         tipoPrecio,
         subtotal: sub,
-        iva: null, // reservado para facturación electrónica
+        ivaTasa: tasaIvaDe(p),
       });
       updates.push({ ref: productoRefs[idx], stockPorDeposito, stockTotal, productoId: it.productoId, cantidad: it.cantidad });
     });
@@ -2644,6 +2695,7 @@ async function registrarVenta({
       subtotal,
       descuento: desc,
       total,
+      liquidacionIva: calcularLiquidacionIva(itemsGuardados, desc),
       pagos: pagosGuardados,
       condicion: credito > 0 ? "credito" : "contado",
       saldoPendiente: credito,
@@ -2717,7 +2769,18 @@ async function generarTicketPDF({ venta, empresaNombre, logoDataUrl, nombreDepos
   doc.setFontSize(10);
   doc.text("TOTAL Gs.", margen, y);
   doc.text(Number(venta.total).toLocaleString("es-PY"), W - margen, y, { align: "right" });
-  y += 6;
+  y += 5;
+  {
+    const liq = venta.liquidacionIva || calcularLiquidacionIva(venta.items, venta.descuento);
+    doc.setFont(undefined, "normal");
+    doc.setFontSize(7.5);
+    const partes = [];
+    if (liq.exenta > 0) partes.push(`Exentas: ${liq.exenta.toLocaleString("es-PY")}`);
+    if (liq.iva5 > 0 || liq.gravada5 > 0) partes.push(`IVA 5%: ${liq.iva5.toLocaleString("es-PY")}`);
+    if (liq.iva10 > 0 || liq.gravada10 > 0) partes.push(`IVA 10%: ${liq.iva10.toLocaleString("es-PY")}`);
+    if (partes.length) { doc.text(partes.join("  ·  "), margen, y); y += 4; }
+    y += 1;
+  }
   doc.setFont(undefined, "normal");
   doc.setFontSize(8);
   (venta.pagos || []).forEach((p) => {
@@ -2897,30 +2960,51 @@ async function generarComprobanteA4PDF({ venta, nombreDeposito }) {
   if (nombreDeposito) lineaDer("Depósito:", nombreDeposito);
 
   // --- Detalle
-  const columnas = [["Código", "Descripción", "Unidad de medida", "Cantidad", "Precio Unitario", "Valor de Venta"]];
-  const filas = (venta.items || []).map((it) => [
-    it.codigoInterno || "",
-    it.nombreProducto || "",
-    "UNI",
-    nf(it.cantidad),
-    nf(it.precioUnitario),
-    nf(it.subtotal),
-  ]);
-  const altoTotales = 42;
+  const columnas = [
+    [
+      { content: "Código", rowSpan: 2 },
+      { content: "Descripción", rowSpan: 2 },
+      { content: "Unidad de medida", rowSpan: 2 },
+      { content: "Cantidad", rowSpan: 2 },
+      { content: "Precio Unitario", rowSpan: 2 },
+      { content: "Valor de Venta", colSpan: 3 },
+    ],
+    ["Exentas", "5%", "10%"],
+  ];
+  const tasaDe = (it) => (it.ivaTasa === 0 || it.ivaTasa === 5 ? it.ivaTasa : 10);
+  const colsTasa = { 0: 0, 5: 0, 10: 0 };
+  const filas = (venta.items || []).map((it) => {
+    const t = tasaDe(it);
+    colsTasa[t] += it.subtotal || 0;
+    return [
+      it.codigoInterno || "",
+      it.nombreProducto || "",
+      "UNI",
+      nf(it.cantidad),
+      nf(it.precioUnitario),
+      t === 0 ? nf(it.subtotal) : "0",
+      t === 5 ? nf(it.subtotal) : "0",
+      t === 10 ? nf(it.subtotal) : "0",
+    ];
+  });
+  const liq = venta.liquidacionIva || calcularLiquidacionIva(venta.items || [], venta.descuento);
+  const altoTotales = 52;
   doc.autoTable({
     startY: yCli + altoCli + 1.5,
     head: columnas,
     body: filas,
     theme: "grid",
     margin: { left: L, right: 210 - R, bottom: 297 - PIE_Y + altoTotales + 2 },
-    styles: { fontSize: 8, cellPadding: 1.6, lineColor: [0, 0, 0], lineWidth: 0.2, textColor: 0 },
+    styles: { fontSize: 7.5, cellPadding: 1.5, lineColor: [0, 0, 0], lineWidth: 0.2, textColor: 0, valign: "middle" },
     headStyles: { fillColor: [235, 235, 235], textColor: 0, halign: "center", fontStyle: "bold" },
     columnStyles: {
-      0: { cellWidth: 24 },
-      2: { cellWidth: 18, halign: "center" },
-      3: { cellWidth: 18, halign: "right" },
-      4: { cellWidth: 26, halign: "right" },
-      5: { cellWidth: 28, halign: "right" },
+      0: { cellWidth: 19 },
+      2: { cellWidth: 14, halign: "center" },
+      3: { cellWidth: 14, halign: "right" },
+      4: { cellWidth: 21, halign: "right" },
+      5: { cellWidth: 21, halign: "right" },
+      6: { cellWidth: 21, halign: "right" },
+      7: { cellWidth: 21, halign: "right" },
     },
   });
 
@@ -2932,7 +3016,7 @@ async function generarComprobanteA4PDF({ venta, nombreDeposito }) {
   }
   doc.rect(L, yT, ANCHO, altoTotales);
   const xTot = 105;
-  doc.line(xTot, yT, xTot, yT + altoTotales);
+  doc.line(xTot, yT, xTot, yT + altoTotales - 9);
 
   // Izquierda: forma de pago
   doc.setFontSize(8);
@@ -2970,6 +3054,20 @@ async function generarComprobanteA4PDF({ venta, nombreDeposito }) {
   doc.setFont(undefined, "normal");
   const letras = "Guaraníes " + numeroALetras(venta.total) + ".";
   doc.text(doc.splitTextToSize(letras.charAt(0).toUpperCase() + letras.slice(1), R - xTot - 6), xTot + 3, yT + 33);
+
+  // Liquidación del IVA (franja inferior del cuadro de totales)
+  const yIva = yT + altoTotales - 9;
+  doc.line(L, yIva, R, yIva);
+  doc.setFont(undefined, "bold");
+  doc.text("SUBTOTAL (valor de venta):", L + 3, yIva + 4);
+  doc.setFont(undefined, "normal");
+  doc.text(`Exentas ${nf(colsTasa[0])}   ·   5% ${nf(colsTasa[5])}   ·   10% ${nf(colsTasa[10])}`, L + 50, yIva + 4);
+  doc.setFont(undefined, "bold");
+  doc.text("LIQUIDACIÓN DEL IVA:", L + 3, yIva + 7.8);
+  doc.setFont(undefined, "normal");
+  doc.text(`(5%) ${nf(liq.iva5)}   ·   (10%) ${nf(liq.iva10)}`, L + 50, yIva + 7.8);
+  doc.setFont(undefined, "bold");
+  doc.text(`TOTAL IVA: ${nf(liq.totalIva)}`, R - 3, yIva + 7.8, { align: "right" });
 
   // --- Leyenda y pie en todas las páginas
   const total = doc.getNumberOfPages();
@@ -3497,6 +3595,14 @@ function VentasPage({ empresaNombre, logoDataUrl, role, currentUid, currentUserN
                 </table>
               </div>
               {verDetalle.descuento > 0 ? <p style={{ textAlign: "right", margin: "8px 0 0" }}>Descuento: -{formatoGs(verDetalle.descuento)}</p> : null}
+              {(() => {
+                const liq = verDetalle.liquidacionIva || calcularLiquidacionIva(verDetalle.items || [], verDetalle.descuento);
+                return (
+                  <p style={{ textAlign: "right", fontSize: 12, color: "var(--color-text-soft)", margin: "4px 0 0" }}>
+                    IVA 10%: {formatoGs(liq.iva10)} · IVA 5%: {formatoGs(liq.iva5)} · Exentas: {formatoGs(liq.exenta)}
+                  </p>
+                );
+              })()}
               <p style={{ textAlign: "right", fontWeight: 600 }}>Total: {formatoGs(verDetalle.total)}</p>
               <p style={{ fontSize: 12.5, margin: 0 }}>
                 {(verDetalle.pagos || []).map((p) => `${METODOS_PAGO[p.metodo] || p.metodo}: ${formatoGs(p.monto)}`).join(" · ")}
