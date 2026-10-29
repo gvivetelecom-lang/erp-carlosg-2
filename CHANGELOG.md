@@ -3,6 +3,20 @@
 Versionado semántico informal: patch para correcciones, minor para
 nuevas funcionalidades (sección 17.2 de la especificación funcional).
 
+## [0.15.0] — Dashboard con datos reales
+
+### Agregado
+- Inicio: indicadores en tiempo real — ventas del día y del mes (con
+  cantidad de ventas), ticket promedio del mes, productos con stock bajo
+  (y agotados), cuentas a cobrar (total y clientes).
+- Gráfico de ventas de los últimos 7 días, ranking de los 5 productos
+  más vendidos del mes y tabla de stock bajo/agotado.
+- Las ventas anuladas no se cuentan. Si el rol no puede leer ventas, los
+  indicadores de ventas se muestran como "—".
+- Stock bajo = hasta 5 unidades (constante `UMBRAL_STOCK_BAJO`); solo
+  cuenta productos que alguna vez tuvieron stock cargado.
+- "Cuentas a pagar" queda en "—" hasta que exista Pagos a proveedores.
+
 ## [0.14.0] — Finanzas: Cuentas a cobrar
 
 ### Agregado

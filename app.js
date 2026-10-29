@@ -359,44 +359,172 @@ function Topbar({ userDoc, firebaseUser, onLogout, empresaNombre, sucursalNombre
 }
 
 /* ------------------------------------------------------------------ */
-/* Dashboard (Inicio) — datos de ejemplo, se conecta a Firestore        */
-/* cuando existan movimientos reales de Stock / POS.                    */
+/* Dashboard (Inicio) — datos reales en tiempo real                     */
 /* ------------------------------------------------------------------ */
 
+const UMBRAL_STOCK_BAJO = 5; // unidades; por debajo (o igual) se considera "stock bajo"
+
 function Dashboard() {
+  const [ventas, setVentas] = useState(null);       // null = cargando, false = sin permiso
+  const [productos, setProductos] = useState(null);
+  const [clientes, setClientes] = useState(null);
+
+  const ahora = new Date();
+  const inicioHoy = new Date(ahora.getFullYear(), ahora.getMonth(), ahora.getDate());
+  const inicioMes = new Date(ahora.getFullYear(), ahora.getMonth(), 1);
+  const inicio7 = new Date(inicioHoy); inicio7.setDate(inicio7.getDate() - 6);
+  const desde = inicio7 < inicioMes ? inicio7 : inicioMes;
+
+  useEffect(() => {
+    const unsub = db.collection("ventas")
+      .where("fecha", ">=", firebase.firestore.Timestamp.fromDate(desde))
+      .orderBy("fecha", "desc")
+      .onSnapshot(
+        (snap) => setVentas(snap.docs.map((d) => d.data())),
+        (err) => { console.warn("Dashboard ventas:", err.code); setVentas(false); }
+      );
+    return () => unsub();
+  }, [desde.getTime()]);
+
+  useEffect(() => {
+    const u1 = db.collection("productos").onSnapshot(
+      (snap) => setProductos(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+      (err) => { console.warn(err.code); setProductos(false); }
+    );
+    const u2 = db.collection("clientes").onSnapshot(
+      (snap) => setClientes(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+      (err) => { console.warn(err.code); setClientes(false); }
+    );
+    return () => { u1(); u2(); };
+  }, []);
+
+  const fechaDe = (v) => (v.fecha && v.fecha.toDate ? v.fecha.toDate() : null);
+  const validas = Array.isArray(ventas) ? ventas.filter((v) => v.estado === "emitida" && fechaDe(v)) : [];
+  const delMes = validas.filter((v) => fechaDe(v) >= inicioMes);
+  const deHoy = validas.filter((v) => fechaDe(v) >= inicioHoy);
+  const suma = (arr) => arr.reduce((a, v) => a + (v.total || 0), 0);
+
+  // Últimos 7 días
+  const dias = [];
+  for (let i = 6; i >= 0; i--) {
+    const d0 = new Date(inicioHoy); d0.setDate(d0.getDate() - i);
+    const d1 = new Date(d0); d1.setDate(d1.getDate() + 1);
+    const delDia = validas.filter((v) => fechaDe(v) >= d0 && fechaDe(v) < d1);
+    dias.push({
+      etiqueta: `${String(d0.getDate()).padStart(2, "0")}/${String(d0.getMonth() + 1).padStart(2, "0")}`,
+      total: suma(delDia), cantidad: delDia.length,
+    });
+  }
+  const maxDia = Math.max(...dias.map((d) => d.total), 1);
+
+  // Top 5 productos del mes (por monto)
+  const acum = {};
+  delMes.forEach((v) => (v.items || []).forEach((it) => {
+    const a = acum[it.productoId] || (acum[it.productoId] = { nombre: it.nombreProducto, cantidad: 0, monto: 0 });
+    a.cantidad += it.cantidad; a.monto += it.subtotal;
+  }));
+  const top = Object.values(acum).sort((a, b) => b.monto - a.monto).slice(0, 5);
+
+  // Stock bajo: solo productos que alguna vez tuvieron stock cargado
+  const conStock = Array.isArray(productos) ? productos.filter((p) => p.activo !== false && typeof p.stockTotal === "number") : [];
+  const bajos = conStock.filter((p) => p.stockTotal <= UMBRAL_STOCK_BAJO).sort((a, b) => a.stockTotal - b.stockTotal);
+  const agotados = bajos.filter((p) => p.stockTotal <= 0).length;
+
+  const deudores = Array.isArray(clientes) ? clientes.filter((c) => (c.saldoPendiente || 0) > 0) : [];
+  const totalCobrar = deudores.reduce((a, c) => a + c.saldoPendiente, 0);
+
+  const val = (dato, f) => (dato === null ? "..." : dato === false ? "—" : f());
+
   const kpis = [
-    { label: "Ventas del día", value: "—" },
-    { label: "Ventas del mes", value: "—" },
-    { label: "Ticket promedio", value: "—" },
-    { label: "Productos con stock bajo", value: "—" },
-    { label: "Cuentas a cobrar", value: "—" },
-    { label: "Cuentas a pagar", value: "—" },
+    { label: "Ventas del día", value: val(ventas, () => formatoGs(suma(deHoy))), sub: val(ventas, () => `${deHoy.length} ventas`) },
+    { label: "Ventas del mes", value: val(ventas, () => formatoGs(suma(delMes))), sub: val(ventas, () => `${delMes.length} ventas`) },
+    { label: "Ticket promedio (mes)", value: val(ventas, () => formatoGs(delMes.length ? suma(delMes) / delMes.length : 0)), sub: "" },
+    { label: "Productos con stock bajo", value: val(productos, () => String(bajos.length)), sub: val(productos, () => `${agotados} agotados · umbral ${UMBRAL_STOCK_BAJO} u.`) },
+    { label: "Cuentas a cobrar", value: val(clientes, () => formatoGs(totalCobrar)), sub: val(clientes, () => `${deudores.length} clientes`) },
+    { label: "Cuentas a pagar", value: "—", sub: "Disponible con Pagos a proveedores" },
   ];
+
   return (
     <div>
       <div className="page-header">
         <div>
           <h1>Inicio</h1>
-          <p>Visión ejecutiva del negocio. Los valores se completan a medida que se activan Stock, POS y Finanzas.</p>
+          <p>Visión ejecutiva del negocio, en tiempo real. Las ventas anuladas no se cuentan.</p>
         </div>
       </div>
+
       <div className="kpi-grid">
         {kpis.map((k) => (
           <div className="kpi-card" key={k.label}>
             <div className="kpi-label">{k.label}</div>
-            <div className="kpi-value">{k.value}</div>
+            <div className="kpi-value small">{k.value}</div>
+            {k.sub ? <div className="kpi-sub">{k.sub}</div> : null}
           </div>
         ))}
       </div>
-      <div className="card">
-        <div className="card-header"><h3>Próximos pasos de la Fase 1</h3></div>
-        <div className="card-body">
-          <p style={{ color: "var(--color-text-soft)", fontSize: 13 }}>
-            Cargar los maestros principales de Stock (empezando por Marcas, ya
-            disponible) y crear los usuarios del equipo en el módulo de
-            Seguridad para habilitar el resto de los módulos.
-          </p>
+
+      {ventas === false ? (
+        <div className="card"><div className="card-body" style={{ fontSize: 13, color: "var(--color-text-soft)" }}>
+          Tu rol no tiene acceso a las ventas, por eso esos indicadores no se muestran.
+        </div></div>
+      ) : (
+        <div className="dash-grid">
+          <div className="card">
+            <div className="card-header"><h3>Ventas de los últimos 7 días</h3></div>
+            <div className="card-body">
+              <div className="dash-bars">
+                {dias.map((d) => (
+                  <div className="dash-bar-col" key={d.etiqueta} title={`${d.etiqueta}: ${formatoGs(d.total)} (${d.cantidad} ventas)`}>
+                    <div className="dash-bar-valor">{d.total > 0 ? Math.round(d.total / 1000).toLocaleString("es-PY") + "k" : ""}</div>
+                    <div className="dash-bar" style={{ height: Math.max((d.total / maxDia) * 100, d.total > 0 ? 4 : 0) + "px" }} />
+                    <div className="dash-bar-etq">{d.etiqueta}</div>
+                  </div>
+                ))}
+              </div>
+              <p style={{ fontSize: 11.5, color: "var(--color-text-soft)", margin: "8px 0 0" }}>Montos en miles de guaraníes.</p>
+            </div>
+          </div>
+
+          <div className="card">
+            <div className="card-header"><h3>Más vendidos del mes</h3></div>
+            <div className="table-scroll">
+              <table className="data-table">
+                <thead><tr><th>Producto</th><th>Cant.</th><th>Monto</th></tr></thead>
+                <tbody>
+                  {ventas === null ? (
+                    <tr><td colSpan={3}>Cargando...</td></tr>
+                  ) : top.length === 0 ? (
+                    <tr><td colSpan={3} style={{ color: "var(--color-text-soft)" }}>Todavía no hay ventas este mes.</td></tr>
+                  ) : top.map((t) => (
+                    <tr key={t.nombre}><td>{t.nombre}</td><td>{t.cantidad}</td><td>{formatoGs(t.monto)}</td></tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
+      )}
+
+      <div className="card">
+        <div className="card-header"><h3>Stock bajo o agotado</h3></div>
+        <div className="table-scroll">
+          <table className="data-table">
+            <thead><tr><th>Código</th><th>Producto</th><th>Stock total</th></tr></thead>
+            <tbody>
+              {productos === null ? (
+                <tr><td colSpan={3}>Cargando...</td></tr>
+              ) : bajos.length === 0 ? (
+                <tr><td colSpan={3} style={{ color: "var(--color-text-soft)" }}>Ningún producto con stock cargado está por debajo del umbral.</td></tr>
+              ) : bajos.slice(0, 10).map((p) => (
+                <tr key={p.id}>
+                  <td>{p.codigoInterno}</td><td>{p.nombre}</td>
+                  <td>{p.stockTotal <= 0 ? <span className="oc-estado oc-anulada">Agotado</span> : p.stockTotal}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {bajos.length > 10 ? <div className="card-body" style={{ fontSize: 12, color: "var(--color-text-soft)" }}>Mostrando 10 de {bajos.length}.</div> : null}
       </div>
     </div>
   );
