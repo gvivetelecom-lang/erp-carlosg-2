@@ -3,6 +3,26 @@
 Versionado semántico informal: patch para correcciones, minor para
 nuevas funcionalidades (sección 17.2 de la especificación funcional).
 
+## [0.12.0] — Comprobante de venta en A4
+
+### Agregado
+- Comprobante de venta en hoja A4 (PDF), con el orden de campos de una
+  factura: franja "sin validez fiscal", encabezado de empresa (logo,
+  dirección de la sucursal predeterminada, ciudad, teléfono, correo,
+  RUC) y número de comprobante, datos del cliente, fecha, condición de
+  venta y moneda, detalle (código, descripción, unidad, cantidad, precio,
+  valor de venta; varias páginas si hace falta), forma de pago, saldo a
+  cobrar, subtotal, descuento, total y total en letras, y pie con
+  usuario y numeración de páginas.
+- Se imprime desde el POS al terminar la venta y desde Ventas → Ver.
+  El ticket de 80 mm sigue disponible como alternativa.
+- Configuración → Empresa: nuevos datos RUC, ciudad, teléfono y correo
+  (todos opcionales) para el encabezado del comprobante.
+
+### Nota
+- Todavía no hay columnas de IVA (exentas / 5% / 10%): los productos aún
+  no tienen tasa de IVA. Se agregan junto con la factura electrónica.
+
 ## [0.11.0] — Facturación / POS: Punto de venta, Ventas y Clientes
 
 ### Agregado

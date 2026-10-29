@@ -2606,6 +2606,257 @@ async function generarTicketPDF({ venta, empresaNombre, logoDataUrl, nombreDepos
   doc.save(`ticket-${venta.codigoVenta}.pdf`);
 }
 
+/* ------------------------------------------------------------------ */
+/* Comprobante de venta A4 (documento interno, sin validez fiscal)      */
+/* Orden de campos inspirado en el KuDE: encabezado de empresa,         */
+/* datos del cliente, detalle, totales y pie. Cuando se active SIFEN    */
+/* este documento se reemplaza por la factura electrónica.              */
+/* ------------------------------------------------------------------ */
+
+const _UN = ["", "uno", "dos", "tres", "cuatro", "cinco", "seis", "siete", "ocho", "nueve", "diez", "once", "doce", "trece", "catorce", "quince", "dieciséis", "diecisiete", "dieciocho", "diecinueve", "veinte", "veintiuno", "veintidós", "veintitrés", "veinticuatro", "veinticinco", "veintiséis", "veintisiete", "veintiocho", "veintinueve"];
+const _DEC = ["", "", "", "treinta", "cuarenta", "cincuenta", "sesenta", "setenta", "ochenta", "noventa"];
+const _CEN = ["", "ciento", "doscientos", "trescientos", "cuatrocientos", "quinientos", "seiscientos", "setecientos", "ochocientos", "novecientos"];
+
+function _menorMil(n) {
+  if (n === 100) return "cien";
+  const c = Math.floor(n / 100);
+  const r = n % 100;
+  let s = _CEN[c];
+  if (r > 0) {
+    if (s) s += " ";
+    if (r < 30) s += _UN[r];
+    else s += _DEC[Math.floor(r / 10)] + (r % 10 ? " y " + _UN[r % 10] : "");
+  }
+  return s;
+}
+const _apocope = (t) => t.replace(/veintiuno$/, "veintiún").replace(/uno$/, "un");
+
+/** 1234567 -> "un millón doscientos treinta y cuatro mil quinientos sesenta y siete" */
+function numeroALetras(valor) {
+  const n = Math.floor(Math.abs(Number(valor) || 0));
+  if (n === 0) return "cero";
+  const mill = Math.floor(n / 1000000);
+  const mil = Math.floor((n % 1000000) / 1000);
+  const resto = n % 1000;
+  const partes = [];
+  if (mill) partes.push(mill === 1 ? "un millón" : _apocope(numeroALetras(mill)) + " millones");
+  if (mil) partes.push(mil === 1 ? "mil" : _apocope(_menorMil(mil)) + " mil");
+  if (resto) partes.push(_menorMil(resto));
+  return partes.join(" ");
+}
+
+async function generarComprobanteA4PDF({ venta, nombreDeposito }) {
+  // Datos de la empresa, sucursal predeterminada y cliente (se leen al momento de imprimir).
+  let empresa = {};
+  let sucursal = {};
+  let cliente = {};
+  try {
+    const cfg = await db.collection("configuracion").doc("general").get();
+    if (cfg.exists) empresa = cfg.data();
+  } catch (e) { console.warn(e); }
+  try {
+    const sn = await db.collection("sucursales").get();
+    const lista = sn.docs.map((d) => d.data()).filter((s) => s.activo !== false);
+    sucursal = lista.find((s) => s.predeterminada) || lista[0] || {};
+  } catch (e) { console.warn(e); }
+  if (venta.clienteId) {
+    try {
+      const cd = await db.collection("clientes").doc(venta.clienteId).get();
+      if (cd.exists) cliente = cd.data();
+    } catch (e) { console.warn(e); }
+  }
+
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: "mm", format: "a4" });
+  const L = 10;          // margen izquierdo
+  const R = 200;         // borde derecho
+  const ANCHO = R - L;
+  const PIE_Y = 287;     // límite inferior del contenido
+  const nf = (v) => Number(v || 0).toLocaleString("es-PY");
+  const logoDataUrl = empresa.logoDataUrl || "";
+  // Ancho de la etiqueta en negrita (se mide en la misma fuente en que se dibuja).
+  const wEtq = (etq) => { doc.setFont(undefined, "bold"); return doc.getTextWidth(etq) + 2; };
+
+  doc.setLineWidth(0.3);
+  doc.setDrawColor(0);
+
+  // --- Franja superior
+  doc.rect(L, 10, ANCHO, 6);
+  doc.setFont(undefined, "bold");
+  doc.setFontSize(8.5);
+  doc.text("COMPROBANTE DE VENTA — DOCUMENTO INTERNO SIN VALIDEZ FISCAL", (L + R) / 2, 14.2, { align: "center" });
+
+  // --- Bloque empresa (izq) y número (der)
+  const yEmp = 16;
+  const altoEmp = 42;
+  const xDiv = 135;
+  doc.rect(L, yEmp, ANCHO, altoEmp);
+  doc.line(xDiv, yEmp, xDiv, yEmp + altoEmp);
+
+  let y = yEmp + 4;
+  if (logoDataUrl) {
+    const dims = await obtenerDimensionesImagen(logoDataUrl);
+    if (dims && dims.w > 0) {
+      let w = 38;
+      let h = w * (dims.h / dims.w);
+      if (h > 18) { h = 18; w = h * (dims.w / dims.h); }
+      const fmt = /^data:image\/jpe?g/i.test(logoDataUrl) ? "JPEG" : "PNG";
+      doc.addImage(logoDataUrl, fmt, L + 3, y, w, h);
+      y += h + 3;
+    }
+  }
+  doc.setFont(undefined, "bold");
+  doc.setFontSize(10);
+  doc.text(empresa.empresaNombre || "", L + 3, y + 1);
+  y += 5;
+  doc.setFontSize(8);
+  const lineaEmpresa = (etq, val) => {
+    if (!val) return;
+    const t = doc.splitTextToSize(val, xDiv - L - 8 - wEtq(etq));
+    doc.setFont(undefined, "bold"); doc.text(etq, L + 3, y);
+    doc.setFont(undefined, "normal"); doc.text(t, L + 3 + wEtq(etq), y);
+    y += 3.6 * t.length;
+  };
+  lineaEmpresa("Dirección:", sucursal.direccion || empresa.empresaDireccion);
+  lineaEmpresa("Ciudad:", empresa.empresaCiudad);
+  lineaEmpresa("Teléfono:", empresa.empresaTelefono);
+  lineaEmpresa("Correo Electrónico:", empresa.empresaEmail);
+
+  // Derecha: RUC, tipo de documento y número
+  let yd = yEmp + 6;
+  doc.setFontSize(8.5);
+  if (empresa.empresaRuc) {
+    doc.setFont(undefined, "bold"); doc.text("RUC:", xDiv + 4, yd);
+    doc.setFont(undefined, "normal"); doc.text(String(empresa.empresaRuc), xDiv + 14, yd);
+  }
+  doc.setFont(undefined, "bold");
+  doc.setFontSize(12);
+  doc.text("COMPROBANTE", xDiv + 4, yEmp + 24);
+  doc.text("DE VENTA", xDiv + 4, yEmp + 30);
+  doc.text(venta.codigoVenta, xDiv + 4, yEmp + 37);
+
+  // --- Bloque cliente (izq) y condiciones (der)
+  const yCli = yEmp + altoEmp + 1.5;
+  const altoCli = 27;
+  doc.rect(L, yCli, ANCHO, altoCli);
+  doc.line(xDiv, yCli, xDiv, yCli + altoCli);
+  doc.setFontSize(8);
+  let yc = yCli + 5;
+  const lineaCli = (etq, val) => {
+    if (!val) return;
+    const t = doc.splitTextToSize(String(val), xDiv - L - 8 - wEtq(etq));
+    doc.setFont(undefined, "bold"); doc.text(etq, L + 3, yc);
+    doc.setFont(undefined, "normal"); doc.text(t[0], L + 3 + wEtq(etq), yc);
+    yc += 4;
+  };
+  lineaCli("RUC / C.I.:", venta.clienteDocumento || cliente.ruc || "Sin identificar");
+  lineaCli("Nombre o Razón Social:", venta.clienteNombre || "Consumidor final");
+  lineaCli("Dirección:", cliente.direccion);
+  lineaCli("Teléfono:", cliente.telefono);
+  lineaCli("Correo Electrónico:", cliente.email);
+
+  const fecha = venta.fecha && venta.fecha.toDate ? venta.fecha.toDate() : (venta.fechaLocal || new Date());
+  let yr = yCli + 5;
+  const lineaDer = (etq, val) => {
+    doc.setFont(undefined, "bold"); doc.text(etq, xDiv + 4, yr);
+    doc.setFont(undefined, "normal"); doc.text(String(val), xDiv + 4 + wEtq(etq), yr);
+    yr += 4;
+  };
+  const p2 = (x) => String(x).padStart(2, "0");
+  lineaDer("Fecha de Emisión:", `${p2(fecha.getDate())}/${p2(fecha.getMonth() + 1)}/${fecha.getFullYear()} ${p2(fecha.getHours())}:${p2(fecha.getMinutes())}:${p2(fecha.getSeconds())}`);
+  lineaDer("Condición de Venta:", venta.condicion === "credito" ? "Crédito" : "Contado");
+  lineaDer("Moneda:", "Guaraníes (PYG)");
+  if (nombreDeposito) lineaDer("Depósito:", nombreDeposito);
+
+  // --- Detalle
+  const columnas = [["Código", "Descripción", "Unidad de medida", "Cantidad", "Precio Unitario", "Valor de Venta"]];
+  const filas = (venta.items || []).map((it) => [
+    it.codigoInterno || "",
+    it.nombreProducto || "",
+    "UNI",
+    nf(it.cantidad),
+    nf(it.precioUnitario),
+    nf(it.subtotal),
+  ]);
+  const altoTotales = 42;
+  doc.autoTable({
+    startY: yCli + altoCli + 1.5,
+    head: columnas,
+    body: filas,
+    theme: "grid",
+    margin: { left: L, right: 210 - R, bottom: 297 - PIE_Y + altoTotales + 2 },
+    styles: { fontSize: 8, cellPadding: 1.6, lineColor: [0, 0, 0], lineWidth: 0.2, textColor: 0 },
+    headStyles: { fillColor: [235, 235, 235], textColor: 0, halign: "center", fontStyle: "bold" },
+    columnStyles: {
+      0: { cellWidth: 24 },
+      2: { cellWidth: 18, halign: "center" },
+      3: { cellWidth: 18, halign: "right" },
+      4: { cellWidth: 26, halign: "right" },
+      5: { cellWidth: 28, halign: "right" },
+    },
+  });
+
+  // --- Totales (siempre al pie de la última página)
+  let yT = PIE_Y - altoTotales;
+  if (doc.lastAutoTable.finalY + 3 > yT) {
+    doc.addPage();
+    yT = PIE_Y - altoTotales;
+  }
+  doc.rect(L, yT, ANCHO, altoTotales);
+  const xTot = 105;
+  doc.line(xTot, yT, xTot, yT + altoTotales);
+
+  // Izquierda: forma de pago
+  doc.setFontSize(8);
+  let yp = yT + 5;
+  doc.setFont(undefined, "bold");
+  doc.text("FORMA DE PAGO", L + 3, yp);
+  doc.setFont(undefined, "normal");
+  yp += 4.5;
+  (venta.pagos || []).forEach((p) => {
+    doc.text(METODOS_PAGO[p.metodo] || p.metodo, L + 3, yp);
+    doc.text(nf(p.monto), xTot - 4, yp, { align: "right" });
+    yp += 4;
+  });
+  if (venta.saldoPendiente > 0) {
+    doc.setFont(undefined, "bold");
+    doc.text("SALDO A COBRAR", L + 3, yp + 1);
+    doc.text(nf(venta.saldoPendiente), xTot - 4, yp + 1, { align: "right" });
+  }
+
+  // Derecha: subtotal / descuento / total / en letras
+  const fila = (etq, val, yy, negrita) => {
+    doc.setFont(undefined, negrita ? "bold" : "normal");
+    doc.text(etq, xTot + 3, yy);
+    doc.text(val, R - 3, yy, { align: "right" });
+  };
+  fila("SUBTOTAL:", nf(venta.subtotal != null ? venta.subtotal : venta.total), yT + 6, true);
+  fila("DESCUENTO:", nf(venta.descuento || 0), yT + 12, true);
+  doc.line(xTot, yT + 15, R, yT + 15);
+  doc.setFontSize(10);
+  fila("TOTAL DE LA OPERACIÓN:", nf(venta.total), yT + 21, true);
+  doc.setFontSize(8);
+  doc.line(xTot, yT + 24, R, yT + 24);
+  doc.setFont(undefined, "bold");
+  doc.text("TOTAL EN LETRAS:", xTot + 3, yT + 29);
+  doc.setFont(undefined, "normal");
+  const letras = "Guaraníes " + numeroALetras(venta.total) + ".";
+  doc.text(doc.splitTextToSize(letras.charAt(0).toUpperCase() + letras.slice(1), R - xTot - 6), xTot + 3, yT + 33);
+
+  // --- Leyenda y pie en todas las páginas
+  const total = doc.getNumberOfPages();
+  for (let i = 1; i <= total; i++) {
+    doc.setPage(i);
+    doc.setFontSize(7.5);
+    doc.setFont(undefined, "normal");
+    doc.text("Documento interno de control de ventas. No reemplaza a la factura; no tiene validez fiscal.", L, 291);
+    doc.text(`Atendió: ${venta.usuarioNombre || "—"}`, L, 295);
+    doc.text(`Página ${i} de ${total}`, R, 295, { align: "right" });
+  }
+
+  doc.save(`comprobante-${venta.codigoVenta}.pdf`);
+}
+
 function PosBuscador({ productos, depositoId, onAgregar }) {
   const [q, setQ] = useState("");
   const texto = q.trim().toLowerCase();
@@ -2910,7 +3161,11 @@ function PuntoVentaPage({ currentUid, currentUserName, role, empresaNombre, logo
             <div className="modal-footer">
               <button type="button" className="btn btn-secondary" style={{ width: "auto" }}
                 onClick={() => generarTicketPDF({ venta: ultimaVenta, empresaNombre, logoDataUrl, nombreDeposito: nombreDeposito(ultimaVenta.depositoId) })}>
-                Imprimir ticket (PDF)
+                Ticket 80 mm
+              </button>
+              <button type="button" className="btn btn-secondary" style={{ width: "auto" }}
+                onClick={() => generarComprobanteA4PDF({ venta: ultimaVenta, nombreDeposito: nombreDeposito(ultimaVenta.depositoId) })}>
+                Comprobante A4
               </button>
               <button type="button" className="btn btn-primary" style={{ width: "auto" }} onClick={nuevaVenta}>Nueva venta</button>
             </div>
@@ -3016,7 +3271,11 @@ function VentasPage({ empresaNombre, logoDataUrl }) {
             <div className="modal-footer">
               <button type="button" className="btn btn-secondary" style={{ width: "auto" }}
                 onClick={() => generarTicketPDF({ venta: verDetalle, empresaNombre, logoDataUrl, nombreDeposito: nombreDeposito(verDetalle.depositoId) })}>
-                Reimprimir ticket (PDF)
+                Ticket 80 mm
+              </button>
+              <button type="button" className="btn btn-primary" style={{ width: "auto" }}
+                onClick={() => generarComprobanteA4PDF({ venta: verDetalle, nombreDeposito: nombreDeposito(verDetalle.depositoId) })}>
+                Comprobante A4
               </button>
               <button type="button" className="btn btn-secondary" style={{ width: "auto" }} onClick={() => setVerDetalle(null)}>Cerrar</button>
             </div>
@@ -3172,6 +3431,7 @@ function ConfiguracionPage() {
 
 function EmpresaCard() {
   const [nombre, setNombre] = useState("");
+  const [datos, setDatos] = useState({ empresaRuc: "", empresaTelefono: "", empresaEmail: "", empresaCiudad: "" });
   const [logoDataUrl, setLogoDataUrl] = useState(""); // logo ya guardado en Firestore
   const [logoPreview, setLogoPreview] = useState(""); // logo recién elegido, sin guardar
   const [logoError, setLogoError] = useState("");
@@ -3182,8 +3442,13 @@ function EmpresaCard() {
 
   useEffect(() => {
     const unsub = db.collection("configuracion").doc("general").onSnapshot((doc) => {
-      setNombre(doc.exists ? (doc.data().empresaNombre || "") : "");
-      setLogoDataUrl(doc.exists ? (doc.data().logoDataUrl || "") : "");
+      const d = doc.exists ? doc.data() : {};
+      setNombre(d.empresaNombre || "");
+      setDatos({
+        empresaRuc: d.empresaRuc || "", empresaTelefono: d.empresaTelefono || "",
+        empresaEmail: d.empresaEmail || "", empresaCiudad: d.empresaCiudad || "",
+      });
+      setLogoDataUrl(d.logoDataUrl || "");
       setLoading(false);
     });
     return () => unsub();
@@ -3208,7 +3473,13 @@ function EmpresaCard() {
     e.preventDefault();
     setSaving(true);
     try {
-      const payload = { empresaNombre: nombre.trim() };
+      const payload = {
+        empresaNombre: nombre.trim(),
+        empresaRuc: datos.empresaRuc.trim(),
+        empresaTelefono: datos.empresaTelefono.trim(),
+        empresaEmail: datos.empresaEmail.trim(),
+        empresaCiudad: datos.empresaCiudad.trim(),
+      };
       if (logoPreview) {
         payload.logoDataUrl = logoPreview;
       } else if (quitarLogo) {
@@ -3239,6 +3510,22 @@ function EmpresaCard() {
             <div className="field">
               <label>Nombre de la empresa</label>
               <input value={nombre} onChange={(e) => setNombre(e.target.value)} required />
+            </div>
+            <div className="field">
+              <label>RUC (opcional, se imprime en el comprobante)</label>
+              <input value={datos.empresaRuc} onChange={(e) => setDatos({ ...datos, empresaRuc: e.target.value })} placeholder="Ej: 80012345-6" />
+            </div>
+            <div className="field">
+              <label>Ciudad</label>
+              <input value={datos.empresaCiudad} onChange={(e) => setDatos({ ...datos, empresaCiudad: e.target.value })} />
+            </div>
+            <div className="field">
+              <label>Teléfono</label>
+              <input value={datos.empresaTelefono} onChange={(e) => setDatos({ ...datos, empresaTelefono: e.target.value })} />
+            </div>
+            <div className="field">
+              <label>Correo electrónico</label>
+              <input value={datos.empresaEmail} onChange={(e) => setDatos({ ...datos, empresaEmail: e.target.value })} />
             </div>
 
             <div className="field">
