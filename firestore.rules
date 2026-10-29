@@ -148,7 +148,14 @@ service cloud.firestore {
     match /ventas/{docId} {
       allow read: if hasRole(['admin', 'gerencia', 'cajero', 'vendedor', 'finanzas']);
       allow create: if hasRole(['admin', 'gerencia', 'cajero', 'vendedor']);
-      allow update, delete: if false;
+      // La venta no se edita; solo admin/gerencia pueden anularla (una vez),
+      // y únicamente cambian los campos propios de la anulación.
+      allow update: if hasRole(['admin', 'gerencia']) &&
+        resource.data.estado == 'emitida' &&
+        request.resource.data.estado == 'anulada' &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['estado', 'saldoPendiente', 'motivoAnulacion', 'anuladaPorId', 'anuladaPorNombre', 'anuladaEn']);
+      allow delete: if false;
     }
 
     match /movimientosFinancieros/{docId} {

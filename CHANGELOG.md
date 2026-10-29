@@ -3,6 +3,20 @@
 Versionado semántico informal: patch para correcciones, minor para
 nuevas funcionalidades (sección 17.2 de la especificación funcional).
 
+## [0.13.0] — Anulación de ventas
+
+### Agregado
+- Ventas → Ver → "Anular venta" (solo admin y gerencia), con motivo obligatorio.
+  En una sola transacción: devuelve el stock al depósito de la venta
+  (movimiento "ingreso" con motivo "Anulación de venta V-…"), descuenta el
+  crédito pendiente del saldo del cliente y marca la venta como anulada
+  (quién, cuándo y por qué). Una venta solo se puede anular una vez.
+- Las ventas anuladas se ven con su estado en el historial, tienen filtro
+  "Anuladas", no suman al total mostrado, y su comprobante A4 sale con la
+  marca "ANULADO".
+- Reglas: `ventas` permite solo esa actualización (emitida → anulada, con
+  campos acotados); sigue sin permitir editar ni borrar.
+
 ## [0.12.0] — Comprobante de venta en A4
 
 ### Agregado

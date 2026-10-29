@@ -2847,6 +2847,13 @@ async function generarComprobanteA4PDF({ venta, nombreDeposito }) {
   const total = doc.getNumberOfPages();
   for (let i = 1; i <= total; i++) {
     doc.setPage(i);
+    if (venta.estado === "anulada") {
+      doc.setTextColor(200, 40, 40);
+      doc.setFont(undefined, "bold");
+      doc.setFontSize(70);
+      doc.text("ANULADO", 105, 160, { align: "center", angle: 35 });
+      doc.setTextColor(0);
+    }
     doc.setFontSize(7.5);
     doc.setFont(undefined, "normal");
     doc.text("Documento interno de control de ventas. No reemplaza a la factura; no tiene validez fiscal.", L, 291);
@@ -3176,11 +3183,82 @@ function PuntoVentaPage({ currentUid, currentUserName, role, empresaNombre, logo
   );
 }
 
-function VentasPage({ empresaNombre, logoDataUrl }) {
+/** Anula una venta: devuelve el stock al depósito, descuenta el crédito del cliente y la marca "anulada". */
+async function anularVenta({ ventaId, motivo, usuarioId, usuarioNombre }) {
+  const ventaRef = db.collection("ventas").doc(ventaId);
+  const contadorMovRef = db.collection("contadores").doc("movimientosStock");
+
+  await db.runTransaction(async (tx) => {
+    const ventaDoc = await tx.get(ventaRef);
+    if (!ventaDoc.exists) throw new Error("La venta ya no existe.");
+    const v = ventaDoc.data();
+    if (v.estado !== "emitida") throw new Error("Esta venta ya está anulada.");
+
+    const productoRefs = (v.items || []).map((it) => db.collection("productos").doc(it.productoId));
+    const productoDocs = await Promise.all(productoRefs.map((ref) => tx.get(ref)));
+    const clienteRef = v.clienteId && v.saldoPendiente > 0 ? db.collection("clientes").doc(v.clienteId) : null;
+    const clienteDoc = clienteRef ? await tx.get(clienteRef) : null;
+    const contadorMovDoc = await tx.get(contadorMovRef);
+
+    let siguienteMov = contadorMovDoc.exists ? contadorMovDoc.data().ultimo || 0 : 0;
+
+    (v.items || []).forEach((it, idx) => {
+      const pd = productoDocs[idx];
+      if (!pd.exists) return; // producto eliminado: no hay stock que reponer
+      const stockPorDeposito = { ...(pd.data().stockPorDeposito || {}) };
+      stockPorDeposito[v.depositoId] = (stockPorDeposito[v.depositoId] || 0) + it.cantidad;
+      const stockTotal = Object.values(stockPorDeposito).reduce((a, b) => a + b, 0);
+      tx.update(productoRefs[idx], {
+        stockPorDeposito,
+        stockTotal,
+        actualizadoEn: firebase.firestore.FieldValue.serverTimestamp(),
+      });
+      siguienteMov += 1;
+      tx.set(db.collection("movimientosStock").doc(), {
+        codigoMovimiento: "M-" + String(siguienteMov).padStart(6, "0"),
+        tipo: "ingreso",
+        productoId: it.productoId,
+        depositoOrigenId: null,
+        depositoDestinoId: v.depositoId,
+        cantidad: it.cantidad,
+        motivo: `Anulación de venta ${v.codigoVenta}`,
+        ventaId,
+        codigoVenta: v.codigoVenta,
+        usuarioId,
+        usuarioNombre,
+        fecha: firebase.firestore.FieldValue.serverTimestamp(),
+      });
+    });
+
+    if (clienteRef && clienteDoc.exists) {
+      tx.update(clienteRef, {
+        saldoPendiente: Math.max((clienteDoc.data().saldoPendiente || 0) - v.saldoPendiente, 0),
+        actualizadoEn: firebase.firestore.FieldValue.serverTimestamp(),
+      });
+    }
+
+    tx.set(contadorMovRef, { ultimo: siguienteMov }, { merge: true });
+    tx.update(ventaRef, {
+      estado: "anulada",
+      saldoPendiente: 0,
+      motivoAnulacion: motivo,
+      anuladaPorId: usuarioId,
+      anuladaPorNombre: usuarioNombre,
+      anuladaEn: firebase.firestore.FieldValue.serverTimestamp(),
+    });
+  });
+}
+
+function VentasPage({ empresaNombre, logoDataUrl, role, currentUid, currentUserName }) {
   const [ventas, setVentas] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filtro, setFiltro] = useState("");
   const [verDetalle, setVerDetalle] = useState(null);
+  const [anulando, setAnulando] = useState(false);
+  const [motivo, setMotivo] = useState("");
+  const [errorAnular, setErrorAnular] = useState("");
+  const [savingAnular, setSavingAnular] = useState(false);
+  const [toast, setToast] = useState("");
   const depositos = useColeccionSimple("depositos");
 
   useEffect(() => {
@@ -3192,8 +3270,29 @@ function VentasPage({ empresaNombre, logoDataUrl }) {
   }, []);
 
   const nombreDeposito = (id) => (depositos.find((d) => d.id === id) || {}).nombre || "—";
-  const visibles = filtro ? ventas.filter((v) => v.condicion === filtro) : ventas;
-  const totalVisible = visibles.reduce((a, v) => a + (v.total || 0), 0);
+  const visibles = !filtro ? ventas
+    : filtro === "anulada" ? ventas.filter((v) => v.estado === "anulada")
+    : ventas.filter((v) => v.condicion === filtro && v.estado !== "anulada");
+  const totalVisible = visibles.reduce((a, v) => a + (v.estado === "anulada" ? 0 : (v.total || 0)), 0);
+
+  const cerrarDetalle = () => { setVerDetalle(null); setAnulando(false); setMotivo(""); setErrorAnular(""); };
+
+  const confirmarAnulacion = async () => {
+    setErrorAnular("");
+    if (motivo.trim().length < 3) return setErrorAnular("Escribí el motivo de la anulación.");
+    setSavingAnular(true);
+    try {
+      await anularVenta({ ventaId: verDetalle.id, motivo: motivo.trim(), usuarioId: currentUid, usuarioNombre: currentUserName });
+      cerrarDetalle();
+      setToast("Venta anulada. El stock volvió al depósito.");
+      setTimeout(() => setToast(""), 3500);
+    } catch (err) {
+      console.error(err);
+      setErrorAnular(err.message || "No se pudo anular la venta.");
+    } finally {
+      setSavingAnular(false);
+    }
+  };
 
   return (
     <div>
@@ -3211,6 +3310,7 @@ function VentasPage({ empresaNombre, logoDataUrl }) {
               <option value="">Todas</option>
               <option value="contado">Contado</option>
               <option value="credito">Crédito</option>
+              <option value="anulada">Anuladas</option>
             </select>
           </div>
           <p style={{ marginBottom: 16, fontWeight: 600 }}>{visibles.length} ventas · {formatoGs(totalVisible)}</p>
@@ -3231,7 +3331,10 @@ function VentasPage({ empresaNombre, logoDataUrl }) {
                   <td>{v.fecha && v.fecha.toDate ? v.fecha.toDate().toLocaleString("es-PY") : "—"}</td>
                   <td>{v.clienteNombre || "Consumidor final"}</td>
                   <td>{formatoGs(v.total)}</td>
-                  <td>{v.condicion === "credito" ? `Crédito (saldo ${formatoGs(v.saldoPendiente)})` : "Contado"}</td>
+                  <td>
+                    {v.estado === "anulada" ? <span className="oc-estado oc-anulada">Anulada</span>
+                      : v.condicion === "credito" ? `Crédito (saldo ${formatoGs(v.saldoPendiente)})` : "Contado"}
+                  </td>
                   <td>{v.usuarioNombre || "—"}</td>
                   <td><button className="icon-btn" onClick={() => setVerDetalle(v)}>Ver</button></td>
                 </tr>
@@ -3242,11 +3345,11 @@ function VentasPage({ empresaNombre, logoDataUrl }) {
       </div>
 
       {verDetalle ? (
-        <div className="modal-backdrop" onClick={(e) => { if (e.target === e.currentTarget) setVerDetalle(null); }}>
+        <div className="modal-backdrop" onClick={(e) => { if (e.target === e.currentTarget) cerrarDetalle(); }}>
           <div className="modal">
             <div className="modal-header">
-              <h3>{verDetalle.codigoVenta}</h3>
-              <button type="button" className="modal-close" onClick={() => setVerDetalle(null)}>×</button>
+              <h3>{verDetalle.codigoVenta}{verDetalle.estado === "anulada" ? " · ANULADA" : ""}</h3>
+              <button type="button" className="modal-close" onClick={cerrarDetalle}>×</button>
             </div>
             <div className="modal-body">
               <p style={{ fontSize: 12.5, color: "var(--color-text-soft)", marginTop: 0 }}>
@@ -3267,6 +3370,21 @@ function VentasPage({ empresaNombre, logoDataUrl }) {
               <p style={{ fontSize: 12.5, margin: 0 }}>
                 {(verDetalle.pagos || []).map((p) => `${METODOS_PAGO[p.metodo] || p.metodo}: ${formatoGs(p.monto)}`).join(" · ")}
               </p>
+              {verDetalle.estado === "anulada" ? (
+                <p style={{ fontSize: 12.5, color: "var(--color-danger)", marginBottom: 0 }}>
+                  Anulada por {verDetalle.anuladaPorNombre || "—"}: {verDetalle.motivoAnulacion || "sin motivo"}
+                </p>
+              ) : null}
+              {anulando ? (
+                <div className="field" style={{ marginTop: 12 }}>
+                  <label>Motivo de la anulación</label>
+                  <input value={motivo} onChange={(e) => setMotivo(e.target.value)} placeholder="Ej: error de carga, devolución del cliente..." autoFocus />
+                  <p style={{ fontSize: 11.5, color: "var(--color-text-soft)", margin: "6px 0 0" }}>
+                    Devuelve el stock al depósito y descuenta el crédito del cliente. No se puede deshacer.
+                  </p>
+                  {errorAnular ? <div className="form-error" style={{ marginTop: 8 }}>{errorAnular}</div> : null}
+                </div>
+              ) : null}
             </div>
             <div className="modal-footer">
               <button type="button" className="btn btn-secondary" style={{ width: "auto" }}
@@ -3277,11 +3395,22 @@ function VentasPage({ empresaNombre, logoDataUrl }) {
                 onClick={() => generarComprobanteA4PDF({ venta: verDetalle, nombreDeposito: nombreDeposito(verDetalle.depositoId) })}>
                 Comprobante A4
               </button>
-              <button type="button" className="btn btn-secondary" style={{ width: "auto" }} onClick={() => setVerDetalle(null)}>Cerrar</button>
+              {hasActionAccess(role, "pos.anular_venta") && verDetalle.estado === "emitida" ? (
+                anulando ? (
+                  <button type="button" className="btn btn-danger" style={{ width: "auto" }} disabled={savingAnular} onClick={confirmarAnulacion}>
+                    {savingAnular ? "Anulando..." : "Confirmar anulación"}
+                  </button>
+                ) : (
+                  <button type="button" className="btn btn-secondary" style={{ width: "auto" }} onClick={() => setAnulando(true)}>Anular venta</button>
+                )
+              ) : null}
+              <button type="button" className="btn btn-secondary" style={{ width: "auto" }} onClick={cerrarDetalle}>Cerrar</button>
             </div>
           </div>
         </div>
       ) : null}
+
+      {toast ? <div className="toast">{toast}</div> : null}
     </div>
   );
 }
@@ -4033,7 +4162,7 @@ function PageContent({ moduleKey, pageKey, currentUid, currentUserName, role, em
   }
 
   if (moduleKey === "facturacion" && pageKey === "ventas") {
-    return <VentasPage empresaNombre={empresaNombre} logoDataUrl={logoDataUrl} />;
+    return <VentasPage empresaNombre={empresaNombre} logoDataUrl={logoDataUrl} role={role} currentUid={currentUid} currentUserName={currentUserName} />;
   }
 
   if (moduleKey === "facturacion" && pageKey === "clientes") {
