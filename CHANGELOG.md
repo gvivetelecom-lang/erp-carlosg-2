@@ -3,6 +3,29 @@
 Versionado semántico informal: patch para correcciones, minor para
 nuevas funcionalidades (sección 17.2 de la especificación funcional).
 
+## [0.17.0] — Finanzas: Pagos a proveedores
+
+### Agregado
+- Recepción de mercadería: nueva "Condición de pago" (Contado o Crédito)
+  y fecha de vencimiento opcional. Una recepción a crédito queda como
+  factura abierta con `saldoPendiente`. La lista muestra la condición.
+- Finanzas → Pagos a proveedores: deuda total y vencida, deuda por
+  proveedor con su próximo vencimiento, y "Pagar": monto (total o
+  parcial), forma de pago y observaciones. El pago se aplica primero a las
+  facturas que vencen antes.
+- Cada pago es un registro inmutable (PG-000001, contador atómico) y, en
+  la misma transacción, baja el saldo de las facturas y genera un
+  movimiento financiero de egreso.
+- Comprobante de pago en A4 (PDF, sin validez fiscal), al pagar y desde
+  "Últimos pagos". Comparte el diseño del recibo de cobro.
+- Dashboard: "Cuentas a pagar" con datos reales (total, facturas y vencidas).
+- Reglas: nueva colección `pagosProveedores`; `recepciones` admite una
+  actualización que solo reduce `saldoPendiente` (admin/gerencia/finanzas).
+
+### Nota
+- Las recepciones cargadas antes de esta versión no tienen condición de
+  pago: se consideran contado (sin deuda).
+
 ## [0.16.0] — IVA por producto y liquidación en ventas
 
 ### Agregado

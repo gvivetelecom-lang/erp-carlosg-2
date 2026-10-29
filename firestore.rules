@@ -133,6 +133,18 @@ service cloud.firestore {
       // una corrección se registra como movimiento inverso, no se edita.
       allow read: if hasRole(['admin', 'gerencia', 'deposito', 'compras', 'finanzas']);
       allow create: if hasRole(['admin', 'gerencia', 'deposito', 'compras']);
+      // Un pago a proveedor solo puede reducir el saldo pendiente de la factura.
+      allow update: if hasRole(['admin', 'gerencia', 'finanzas']) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['saldoPendiente', 'actualizadoEn']) &&
+        request.resource.data.saldoPendiente >= 0 &&
+        request.resource.data.saldoPendiente < resource.data.saldoPendiente;
+      allow delete: if false;
+    }
+
+    match /pagosProveedores/{docId} {
+      // Pago a proveedores. Inmutable (una corrección sería un movimiento inverso).
+      allow read: if hasRole(['admin', 'gerencia', 'finanzas']);
+      allow create: if hasRole(['admin', 'gerencia', 'finanzas']);
       allow update, delete: if false;
     }
 

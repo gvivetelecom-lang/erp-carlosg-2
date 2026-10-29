@@ -98,7 +98,7 @@ const MENU = [
     children: [
       { key: "bancos", label: "Bancos", soon: true },
       { key: "cuentas-cobrar", label: "Cuentas a cobrar" },
-      { key: "pagos", label: "Pagos a proveedores", soon: true },
+      { key: "pagos", label: "Pagos a proveedores" },
     ],
   },
   {
@@ -368,6 +368,7 @@ function Dashboard() {
   const [ventas, setVentas] = useState(null);       // null = cargando, false = sin permiso
   const [productos, setProductos] = useState(null);
   const [clientes, setClientes] = useState(null);
+  const [porPagar, setPorPagar] = useState(null);
 
   const ahora = new Date();
   const inicioHoy = new Date(ahora.getFullYear(), ahora.getMonth(), ahora.getDate());
@@ -395,7 +396,11 @@ function Dashboard() {
       (snap) => setClientes(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
       (err) => { console.warn(err.code); setClientes(false); }
     );
-    return () => { u1(); u2(); };
+    const u3 = db.collection("recepciones").where("condicion", "==", "credito").onSnapshot(
+      (snap) => setPorPagar(snap.docs.map((d) => d.data()).filter((r) => (r.saldoPendiente || 0) > 0)),
+      (err) => { console.warn(err.code); setPorPagar(false); }
+    );
+    return () => { u1(); u2(); u3(); };
   }, []);
 
   const fechaDe = (v) => (v.fecha && v.fecha.toDate ? v.fecha.toDate() : null);
@@ -441,7 +446,15 @@ function Dashboard() {
     { label: "Ticket promedio (mes)", value: val(ventas, () => formatoGs(delMes.length ? suma(delMes) / delMes.length : 0)), sub: "" },
     { label: "Productos con stock bajo", value: val(productos, () => String(bajos.length)), sub: val(productos, () => `${agotados} agotados · umbral ${UMBRAL_STOCK_BAJO} u.`) },
     { label: "Cuentas a cobrar", value: val(clientes, () => formatoGs(totalCobrar)), sub: val(clientes, () => `${deudores.length} clientes`) },
-    { label: "Cuentas a pagar", value: "—", sub: "Disponible con Pagos a proveedores" },
+    {
+      label: "Cuentas a pagar",
+      value: val(porPagar, () => formatoGs(porPagar.reduce((a, r) => a + r.saldoPendiente, 0))),
+      sub: val(porPagar, () => {
+        const hoyIso = new Date().toISOString().slice(0, 10);
+        const venc = porPagar.filter((r) => r.fechaVencimiento && r.fechaVencimiento < hoyIso).length;
+        return `${porPagar.length} facturas${venc ? ` · ${venc} vencidas` : ""}`;
+      }),
+    },
   ];
 
   return (
@@ -1715,7 +1728,7 @@ function RemisionForm({ depositos, onCancel, onCrear }) {
 /* ------------------------------------------------------------------ */
 
 async function crearRecepcionMercaderia({
-  proveedorId, depositoId, numeroDocumento, observaciones, items, ordenCompraId, usuarioId, usuarioNombre,
+  proveedorId, depositoId, numeroDocumento, observaciones, items, ordenCompraId, condicion, fechaVencimiento, usuarioId, usuarioNombre,
 }) {
   const contadorRecRef = db.collection("contadores").doc("recepciones");
   const contadorMovRef = db.collection("contadores").doc("movimientosStock");
@@ -1818,6 +1831,9 @@ async function crearRecepcionMercaderia({
       proveedorNombre: proveedorDoc.data().nombre,
       depositoId,
       numeroDocumento: numeroDocumento || null,
+      condicion: condicion === "credito" ? "credito" : "contado",
+      saldoPendiente: condicion === "credito" ? total : 0,
+      fechaVencimiento: condicion === "credito" && fechaVencimiento ? fechaVencimiento : null,
       ordenCompraId: ordenCompraId || null,
       codigoOrdenCompra: ordenDoc ? ordenDoc.data().codigoOrden : null,
       observaciones: observaciones || null,
@@ -1840,6 +1856,8 @@ function RecepcionForm({ proveedores, depositos, ordenes, onCancel, onCrear }) {
   const [proveedorId, setProveedorId] = useState("");
   const [depositoId, setDepositoId] = useState("");
   const [numeroDocumento, setNumeroDocumento] = useState("");
+  const [condicion, setCondicion] = useState("contado");
+  const [fechaVencimiento, setFechaVencimiento] = useState("");
   const [observaciones, setObservaciones] = useState("");
   const [items, setItems] = useState([{ productoId: "", cantidad: "", costoUnitario: "" }]);
   const [error, setError] = useState("");
@@ -1902,6 +1920,7 @@ function RecepcionForm({ proveedores, depositos, ordenes, onCancel, onCrear }) {
       await onCrear({
         proveedorId, depositoId, numeroDocumento, observaciones,
         ordenCompraId: ordenCompraId || null,
+        condicion, fechaVencimiento,
         items: itemsValidos.map((it) => ({
           productoId: it.productoId,
           cantidad: Number(it.cantidad),
@@ -1956,6 +1975,19 @@ function RecepcionForm({ proveedores, depositos, ordenes, onCancel, onCrear }) {
                 <label>N° de factura / documento del proveedor</label>
                 <input value={numeroDocumento} onChange={(e) => setNumeroDocumento(e.target.value)} placeholder="Ej: 001-001-0001234" />
               </div>
+              <div className="field">
+                <label>Condición de pago</label>
+                <select value={condicion} onChange={(e) => setCondicion(e.target.value)}>
+                  <option value="contado">Contado (ya pagado)</option>
+                  <option value="credito">Crédito (queda a pagar)</option>
+                </select>
+              </div>
+              {condicion === "credito" ? (
+                <div className="field">
+                  <label>Fecha de vencimiento (opcional)</label>
+                  <input type="date" value={fechaVencimiento} onChange={(e) => setFechaVencimiento(e.target.value)} />
+                </div>
+              ) : null}
               <div className="field">
                 <label>Observaciones (opcional)</label>
                 <input value={observaciones} onChange={(e) => setObservaciones(e.target.value)} />
@@ -2094,14 +2126,15 @@ function RecepcionMercaderiaPage({ currentUid, currentUserName }) {
                 <th>Depósito</th>
                 <th>Ítems</th>
                 <th>Total</th>
+                <th>Pago</th>
                 <th></th>
               </tr>
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={9}>Cargando...</td></tr>
+                <tr><td colSpan={10}>Cargando...</td></tr>
               ) : recepciones.length === 0 ? (
-                <tr><td colSpan={9} style={{ color: "var(--color-text-soft)" }}>
+                <tr><td colSpan={10} style={{ color: "var(--color-text-soft)" }}>
                   Todavía no hay recepciones. Cargá primero un proveedor y un depósito, y luego usá "+ Nueva recepción".
                 </td></tr>
               ) : recepciones.map((r) => (
@@ -2114,6 +2147,7 @@ function RecepcionMercaderiaPage({ currentUid, currentUserName }) {
                   <td>{nombreDeposito(r.depositoId)}</td>
                   <td>{r.totalItems}</td>
                   <td>{formatoGs(r.total)}</td>
+                  <td>{r.condicion === "credito" ? `Crédito (saldo ${formatoGs(r.saldoPendiente)})` : "Contado"}</td>
                   <td><button className="icon-btn" onClick={() => setVerDetalle(r)}>Ver ítems</button></td>
                 </tr>
               ))}
@@ -3758,7 +3792,8 @@ async function registrarCobro({ clienteId, monto, metodo, observaciones, imputac
 }
 
 /** Recibo de cobro en A4 (documento interno, sin validez fiscal). */
-async function generarReciboCobroPDF({ cobro }) {
+async function generarReciboCobroPDF({ cobro, modo }) {
+  const esPago = modo === "pago";
   let empresa = {};
   try {
     const cfg = await db.collection("configuracion").doc("general").get();
@@ -3777,7 +3812,7 @@ async function generarReciboCobroPDF({ cobro }) {
   doc.rect(L, 10, ANCHO, 6);
   doc.setFont(undefined, "bold");
   doc.setFontSize(8.5);
-  doc.text("RECIBO DE COBRO — DOCUMENTO INTERNO SIN VALIDEZ FISCAL", (L + R) / 2, 14.2, { align: "center" });
+  doc.text((esPago ? "COMPROBANTE DE PAGO" : "RECIBO DE COBRO") + " — DOCUMENTO INTERNO SIN VALIDEZ FISCAL", (L + R) / 2, 14.2, { align: "center" });
 
   doc.rect(L, 16, ANCHO, 34);
   doc.line(135, 16, 135, 50);
@@ -3799,7 +3834,7 @@ async function generarReciboCobroPDF({ cobro }) {
     .filter(Boolean).forEach((t, i) => doc.text(t, L + 3, y + 4 + i * 3.6));
   doc.setFont(undefined, "bold");
   doc.setFontSize(12);
-  doc.text("RECIBO DE COBRO", 139, 28);
+  doc.text(esPago ? "COMPROBANTE DE PAGO" : "RECIBO DE COBRO", 139, 28);
   doc.text(cobro.codigoCobro, 139, 35);
   doc.setFontSize(8.5);
   doc.setFont(undefined, "normal");
@@ -3811,7 +3846,7 @@ async function generarReciboCobroPDF({ cobro }) {
     doc.setFont(undefined, "bold"); doc.text(etq, L + 3, yy);
     doc.setFont(undefined, "normal"); doc.text(String(val), L + 3 + 34, yy);
   };
-  fila("Recibimos de:", cobro.clienteNombre || "—", 59);
+  fila(esPago ? "Pagamos a:" : "Recibimos de:", cobro.clienteNombre || "—", 59);
   fila("RUC / C.I.:", cobro.clienteDocumento || "—", 65);
   fila("Forma de pago:", METODOS_COBRO[cobro.metodo] || cobro.metodo, 71);
   doc.setFont(undefined, "bold"); doc.text("La suma de:", L + 3, 77);
@@ -3821,9 +3856,9 @@ async function generarReciboCobroPDF({ cobro }) {
 
   doc.autoTable({
     startY: 85,
-    head: [["Venta", "Monto imputado"]],
+    head: [[esPago ? "Compra / Factura" : "Venta", "Monto imputado"]],
     body: (cobro.imputaciones || []).map((x) => [x.codigoVenta, nf(x.monto)]),
-    foot: [["TOTAL COBRADO (Gs.)", nf(cobro.monto)]],
+    foot: [[esPago ? "TOTAL PAGADO (Gs.)" : "TOTAL COBRADO (Gs.)", nf(cobro.monto)]],
     theme: "grid",
     margin: { left: L, right: 210 - R },
     styles: { fontSize: 9, cellPadding: 1.8, lineColor: [0, 0, 0], lineWidth: 0.2, textColor: 0 },
@@ -3841,11 +3876,11 @@ async function generarReciboCobroPDF({ cobro }) {
   doc.line(L + 10, yf, L + 75, yf);
   doc.line(R - 75, yf, R - 10, yf);
   doc.setFontSize(8.5);
-  doc.text("Firma y aclaración del cliente", L + 42.5, yf + 4, { align: "center" });
-  doc.text(`Recibió: ${cobro.usuarioNombre || "—"}`, R - 42.5, yf + 4, { align: "center" });
+  doc.text(esPago ? "Firma y aclaración del proveedor" : "Firma y aclaración del cliente", L + 42.5, yf + 4, { align: "center" });
+  doc.text(`${esPago ? "Pagó" : "Recibió"}: ${cobro.usuarioNombre || "—"}`, R - 42.5, yf + 4, { align: "center" });
   doc.setFontSize(7.5);
-  doc.text("Documento interno de control de cobranzas. No reemplaza a un recibo fiscal.", L, 291);
-  doc.save(`recibo-${cobro.codigoCobro}.pdf`);
+  doc.text(esPago ? "Documento interno de control de pagos. No reemplaza a un recibo fiscal." : "Documento interno de control de cobranzas. No reemplaza a un recibo fiscal.", L, 291);
+  doc.save(`${esPago ? "comprobante-pago" : "recibo"}-${cobro.codigoCobro}.pdf`);
 }
 
 function CobroModal({ cliente, usuarioId, usuarioNombre, onClose, onListo }) {
@@ -4057,6 +4092,344 @@ function CuentasCobrarPage({ currentUid, currentUserName }) {
       ) : null}
 
       {toast ? <div className="toast">{toast}</div> : null}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Finanzas · Pagos a proveedores                                       */
+/* Las compras a crédito (Recepción de mercadería con condición         */
+/* "Crédito") quedan como facturas abiertas. Un pago se imputa a las    */
+/* más próximas a vencer y es un registro inmutable (PG-000001).        */
+/* ------------------------------------------------------------------ */
+
+const METODOS_PAGO_PROV = { transferencia: "Transferencia", efectivo: "Efectivo", cheque: "Cheque", tarjeta: "Tarjeta" };
+
+/** Facturas abiertas ordenadas: primero las que vencen antes (sin vencimiento al final), luego las más antiguas. */
+function ordenarFacturasAbiertas(lista) {
+  const seg = (r) => (r.fecha && r.fecha.seconds) || 0;
+  return [...lista].sort((a, b) => {
+    const va = a.fechaVencimiento || "9999-99-99";
+    const vb = b.fechaVencimiento || "9999-99-99";
+    if (va !== vb) return va < vb ? -1 : 1;
+    return seg(a) - seg(b);
+  });
+}
+
+function imputarPago(facturas, monto) {
+  let resto = Math.round(Number(monto) || 0);
+  const imputaciones = [];
+  for (const f of facturas) {
+    if (resto <= 0) break;
+    const aplicar = Math.min(resto, f.saldoPendiente || 0);
+    if (aplicar > 0) {
+      imputaciones.push({
+        recepcionId: f.id, codigoRecepcion: f.codigoRecepcion,
+        numeroDocumento: f.numeroDocumento || null, monto: aplicar,
+      });
+      resto -= aplicar;
+    }
+  }
+  return { imputaciones, sobrante: resto };
+}
+
+async function registrarPagoProveedor({ proveedorId, metodo, observaciones, imputaciones, usuarioId, usuarioNombre }) {
+  const montoTotal = imputaciones.reduce((a, x) => a + x.monto, 0);
+  if (!(montoTotal > 0)) throw new Error("El monto a pagar debe ser mayor a 0.");
+
+  const contadorRef = db.collection("contadores").doc("pagosProveedores");
+  const proveedorRef = db.collection("proveedores").doc(proveedorId);
+  const pagoRef = db.collection("pagosProveedores").doc();
+  const movRef = db.collection("movimientosFinancieros").doc();
+  const recRefs = imputaciones.map((x) => db.collection("recepciones").doc(x.recepcionId));
+  let resultado = null;
+
+  await db.runTransaction(async (tx) => {
+    const proveedorDoc = await tx.get(proveedorRef);
+    const recDocs = await Promise.all(recRefs.map((r) => tx.get(r)));
+    const contadorDoc = await tx.get(contadorRef);
+
+    if (!proveedorDoc.exists) throw new Error("El proveedor ya no existe.");
+    recDocs.forEach((rd, i) => {
+      if (!rd.exists) throw new Error("Una de las facturas ya no existe.");
+      if ((rd.data().saldoPendiente || 0) < imputaciones[i].monto) {
+        throw new Error(`La factura ${rd.data().codigoRecepcion} ya no tiene ese saldo (otro pago se registró). Cerrá y volvé a abrir el pago.`);
+      }
+    });
+
+    const siguiente = (contadorDoc.exists ? contadorDoc.data().ultimo || 0 : 0) + 1;
+    const codigoPago = "PG-" + String(siguiente).padStart(6, "0");
+
+    recDocs.forEach((rd, i) => {
+      tx.update(recRefs[i], {
+        saldoPendiente: (rd.data().saldoPendiente || 0) - imputaciones[i].monto,
+        actualizadoEn: firebase.firestore.FieldValue.serverTimestamp(),
+      });
+    });
+
+    const pago = {
+      codigoPago,
+      proveedorId,
+      proveedorNombre: proveedorDoc.data().nombre,
+      proveedorRuc: proveedorDoc.data().ruc || null,
+      monto: montoTotal,
+      metodo,
+      observaciones: observaciones || null,
+      imputaciones,
+      usuarioId,
+      usuarioNombre,
+    };
+    tx.set(contadorRef, { ultimo: siguiente }, { merge: true });
+    tx.set(pagoRef, { ...pago, fecha: firebase.firestore.FieldValue.serverTimestamp() });
+    tx.set(movRef, {
+      tipo: "egreso",
+      origen: "pago_proveedor",
+      pagoId: pagoRef.id,
+      codigoPago,
+      proveedorId,
+      concepto: `Pago ${codigoPago} · ${proveedorDoc.data().nombre}`,
+      monto: montoTotal,
+      metodo,
+      usuarioId,
+      usuarioNombre,
+      fecha: firebase.firestore.FieldValue.serverTimestamp(),
+    });
+    resultado = { id: pagoRef.id, ...pago, fecha: null };
+  });
+  return resultado;
+}
+
+function generarComprobantePagoPDF({ pago }) {
+  return generarReciboCobroPDF({
+    modo: "pago",
+    cobro: {
+      codigoCobro: pago.codigoPago,
+      clienteNombre: pago.proveedorNombre,
+      clienteDocumento: pago.proveedorRuc,
+      monto: pago.monto,
+      metodo: pago.metodo,
+      observaciones: pago.observaciones,
+      usuarioNombre: pago.usuarioNombre,
+      fecha: pago.fecha,
+      fechaLocal: pago.fechaLocal,
+      imputaciones: (pago.imputaciones || []).map((x) => ({
+        codigoVenta: x.codigoRecepcion + (x.numeroDocumento ? ` - Factura ${x.numeroDocumento}` : ""),
+        monto: x.monto,
+      })),
+    },
+  });
+}
+
+function PagoProveedorModal({ proveedor, facturas, usuarioId, usuarioNombre, onClose, onListo }) {
+  const abiertas = ordenarFacturasAbiertas(facturas);
+  const totalPendiente = abiertas.reduce((a, f) => a + f.saldoPendiente, 0);
+  const [monto, setMonto] = useState(String(totalPendiente));
+  const [metodo, setMetodo] = useState("transferencia");
+  const [observaciones, setObservaciones] = useState("");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const { imputaciones, sobrante } = imputarPago(abiertas, monto);
+  const montoNum = Math.round(Number(monto) || 0);
+  const hoy = new Date().toISOString().slice(0, 10);
+
+  const confirmar = async () => {
+    setError("");
+    if (!(montoNum > 0)) return setError("Ingresá el monto a pagar.");
+    if (sobrante > 0) return setError(`El monto supera la deuda (${formatoGs(totalPendiente)}).`);
+    setSaving(true);
+    try {
+      const pago = await registrarPagoProveedor({
+        proveedorId: proveedor.id, metodo, observaciones, imputaciones, usuarioId, usuarioNombre,
+      });
+      onListo({ ...pago, fechaLocal: new Date() });
+    } catch (err) {
+      console.error(err);
+      setError(err.message || "No se pudo registrar el pago.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="modal">
+        <div className="modal-header">
+          <h3>Pagar a {proveedor.nombre}</h3>
+          <button type="button" className="modal-close" onClick={onClose}>×</button>
+        </div>
+        <div className="modal-body">
+          {error ? <div className="form-error">{error}</div> : null}
+          <div className="table-scroll">
+            <table className="data-table">
+              <thead><tr><th>Compra</th><th>Factura</th><th>Vence</th><th>Saldo</th><th>Se paga</th></tr></thead>
+              <tbody>
+                {abiertas.map((f) => {
+                  const ap = imputaciones.find((x) => x.recepcionId === f.id);
+                  const vencida = f.fechaVencimiento && f.fechaVencimiento < hoy;
+                  return (
+                    <tr key={f.id}>
+                      <td>{f.codigoRecepcion}</td>
+                      <td>{f.numeroDocumento || "—"}</td>
+                      <td style={vencida ? { color: "var(--color-danger)", fontWeight: 600 } : null}>{f.fechaVencimiento || "—"}{vencida ? " (vencida)" : ""}</td>
+                      <td>{formatoGs(f.saldoPendiente)}</td>
+                      <td>{ap ? formatoGs(ap.monto) : "—"}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <p style={{ fontSize: 12, color: "var(--color-text-soft)" }}>El pago se aplica primero a las facturas que vencen antes.</p>
+          <div className="form-grid-2">
+            <div className="field">
+              <label>Monto a pagar (Gs.) — deuda {formatoGs(totalPendiente)}</label>
+              <input type="number" min="1" step="1" value={monto} onChange={(e) => setMonto(e.target.value)} />
+            </div>
+            <div className="field">
+              <label>Forma de pago</label>
+              <select value={metodo} onChange={(e) => setMetodo(e.target.value)}>
+                {Object.entries(METODOS_PAGO_PROV).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+              </select>
+            </div>
+          </div>
+          <div className="field">
+            <label>Observaciones (opcional)</label>
+            <input value={observaciones} onChange={(e) => setObservaciones(e.target.value)} placeholder="Ej: N° de transferencia, cheque..." />
+          </div>
+        </div>
+        <div className="modal-footer">
+          <button type="button" className="btn btn-secondary" style={{ width: "auto" }} onClick={onClose}>Cancelar</button>
+          <button type="button" className="btn btn-primary" style={{ width: "auto" }} disabled={saving} onClick={confirmar}>
+            {saving ? "Registrando..." : `Registrar pago ${formatoGs(montoNum)}`}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PagosProveedoresPage({ currentUid, currentUserName }) {
+  const proveedores = useColeccionSimple("proveedores");
+  const [facturas, setFacturas] = useState([]);   // recepciones a crédito con saldo
+  const [pagos, setPagos] = useState([]);
+  const [pagando, setPagando] = useState(null);
+  const [recienPagado, setRecienPagado] = useState(null);
+
+  useEffect(() => {
+    const u1 = db.collection("recepciones").where("condicion", "==", "credito").onSnapshot(
+      (snap) => setFacturas(snap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((r) => (r.saldoPendiente || 0) > 0)),
+      (err) => console.error(err)
+    );
+    const u2 = db.collection("pagosProveedores").orderBy("fecha", "desc").limit(100).onSnapshot(
+      (snap) => setPagos(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+      (err) => console.error(err)
+    );
+    return () => { u1(); u2(); };
+  }, []);
+
+  const hoy = new Date().toISOString().slice(0, 10);
+  const porProveedor = {};
+  facturas.forEach((f) => {
+    const g = porProveedor[f.proveedorId] || (porProveedor[f.proveedorId] = { proveedorId: f.proveedorId, nombre: f.proveedorNombre, facturas: [], saldo: 0, vencido: 0, proximo: null });
+    g.facturas.push(f);
+    g.saldo += f.saldoPendiente;
+    if (f.fechaVencimiento && f.fechaVencimiento < hoy) g.vencido += f.saldoPendiente;
+    if (f.fechaVencimiento && (!g.proximo || f.fechaVencimiento < g.proximo)) g.proximo = f.fechaVencimiento;
+  });
+  const grupos = Object.values(porProveedor).sort((a, b) => b.saldo - a.saldo);
+  const totalPagar = grupos.reduce((a, g) => a + g.saldo, 0);
+  const totalVencido = grupos.reduce((a, g) => a + g.vencido, 0);
+
+  return (
+    <div>
+      <div className="page-header">
+        <div>
+          <h1>Pagos a proveedores</h1>
+          <p>Compras a crédito pendientes de pago (se cargan en Recepción de mercadería con condición "Crédito"). Cada pago se aplica a las facturas que vencen antes.</p>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="card-body" style={{ paddingBottom: 0 }}>
+          <p style={{ margin: 0, fontWeight: 600 }}>
+            Total a pagar: {formatoGs(totalPagar)} · {grupos.length} proveedores
+            {totalVencido > 0 ? <span style={{ color: "var(--color-danger)" }}> · vencido: {formatoGs(totalVencido)}</span> : null}
+          </p>
+        </div>
+        <div className="table-scroll">
+          <table className="data-table">
+            <thead><tr><th>Proveedor</th><th>Facturas</th><th>Próx. vencimiento</th><th>Saldo</th><th></th></tr></thead>
+            <tbody>
+              {grupos.length === 0 ? (
+                <tr><td colSpan={5} style={{ color: "var(--color-text-soft)" }}>No hay deudas con proveedores.</td></tr>
+              ) : grupos.map((g) => (
+                <tr key={g.proveedorId}>
+                  <td>{g.nombre}</td>
+                  <td>{g.facturas.length}</td>
+                  <td style={g.proximo && g.proximo < hoy ? { color: "var(--color-danger)", fontWeight: 600 } : null}>{g.proximo || "—"}</td>
+                  <td>{formatoGs(g.saldo)}</td>
+                  <td>
+                    <button className="icon-btn" onClick={() => setPagando({ proveedor: proveedores.find((p) => p.id === g.proveedorId) || { id: g.proveedorId, nombre: g.nombre }, facturas: g.facturas })}>
+                      Pagar
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="card-header"><h3>Últimos pagos</h3></div>
+        <div className="table-scroll">
+          <table className="data-table">
+            <thead><tr><th>Pago</th><th>Fecha</th><th>Proveedor</th><th>Forma</th><th>Monto</th><th>Facturas</th><th></th></tr></thead>
+            <tbody>
+              {pagos.length === 0 ? (
+                <tr><td colSpan={7} style={{ color: "var(--color-text-soft)" }}>Todavía no hay pagos.</td></tr>
+              ) : pagos.map((p) => (
+                <tr key={p.id}>
+                  <td>{p.codigoPago}</td>
+                  <td>{p.fecha && p.fecha.toDate ? p.fecha.toDate().toLocaleString("es-PY") : "—"}</td>
+                  <td>{p.proveedorNombre}</td>
+                  <td>{METODOS_PAGO_PROV[p.metodo] || p.metodo}</td>
+                  <td>{formatoGs(p.monto)}</td>
+                  <td>{(p.imputaciones || []).map((x) => x.codigoRecepcion).join(", ")}</td>
+                  <td><button className="icon-btn" onClick={() => generarComprobantePagoPDF({ pago: p })}>Comprobante</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {pagando ? (
+        <PagoProveedorModal
+          proveedor={pagando.proveedor}
+          facturas={pagando.facturas}
+          usuarioId={currentUid}
+          usuarioNombre={currentUserName}
+          onClose={() => setPagando(null)}
+          onListo={(pago) => { setPagando(null); setRecienPagado(pago); }}
+        />
+      ) : null}
+
+      {recienPagado ? (
+        <div className="modal-backdrop">
+          <div className="modal">
+            <div className="modal-header"><h3>Pago registrado</h3></div>
+            <div className="modal-body">
+              <p style={{ marginTop: 0 }}><strong>{recienPagado.codigoPago}</strong> · {formatoGs(recienPagado.monto)} · {recienPagado.proveedorNombre}</p>
+            </div>
+            <div className="modal-footer">
+              <button type="button" className="btn btn-secondary" style={{ width: "auto" }} onClick={() => generarComprobantePagoPDF({ pago: recienPagado })}>Imprimir comprobante</button>
+              <button type="button" className="btn btn-primary" style={{ width: "auto" }} onClick={() => setRecienPagado(null)}>Listo</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -4796,6 +5169,10 @@ function PageContent({ moduleKey, pageKey, currentUid, currentUserName, role, em
         ]}
       />
     );
+  }
+
+  if (moduleKey === "finanzas" && pageKey === "pagos") {
+    return <PagosProveedoresPage currentUid={currentUid} currentUserName={currentUserName} />;
   }
 
   if (moduleKey === "finanzas" && pageKey === "cuentas-cobrar") {
