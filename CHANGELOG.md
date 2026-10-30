@@ -3,6 +3,25 @@
 Versionado semántico informal: patch para correcciones, minor para
 nuevas funcionalidades (sección 17.2 de la especificación funcional).
 
+## [0.18.0] — Informes de Ventas, Stock y Compras
+
+### Agregado
+- Informes → Ventas: período a elegir (con atajos Hoy / Este mes / Mes
+  anterior / Últimos 30 días) y agrupación por producto, cliente, forma
+  de pago, día o usuario. Indicadores: total vendido, ticket promedio,
+  descuentos, IVA incluido y ventas a crédito. Las anuladas no se cuentan.
+- Informes → Stock: existencias por depósito (o todos, con una columna
+  por depósito), valorizadas al último costo y al precio minorista, con
+  unidades vendidas en los últimos 90 días. Filtros por depósito, marca,
+  categoría, "solo con stock" y "baja rotación" (con stock y sin ventas
+  en 90 días).
+- Informes → Compras: recepciones del período agrupadas por proveedor,
+  producto (con costo promedio), condición de pago o día; compras a
+  crédito y saldo pendiente.
+- Los tres informes se exportan a Excel y a PDF (con logo y nombre de la
+  empresa, totales y numeración de páginas).
+- Menú Informes: nueva entrada "Compras".
+
 ## [0.17.0] — Finanzas: Pagos a proveedores
 
 ### Agregado

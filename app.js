@@ -128,8 +128,9 @@ const MENU = [
   {
     key: "informes", label: "Informes", icon: "IF",
     children: [
-      { key: "informe-ventas", label: "Ventas", soon: true },
-      { key: "informe-stock", label: "Stock", soon: true },
+      { key: "informe-ventas", label: "Ventas" },
+      { key: "informe-stock", label: "Stock" },
+      { key: "informe-compras", label: "Compras" },
     ],
   },
   {
@@ -4435,6 +4436,523 @@ function PagosProveedoresPage({ currentUid, currentUserName }) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Informes · Ventas, Stock y Compras                                   */
+/* Cada informe se calcula en el navegador con los datos del período    */
+/* elegido y se puede exportar a Excel y PDF.                           */
+/* ------------------------------------------------------------------ */
+
+const isoLocal = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+const PRESETS_PERIODO = {
+  hoy: () => { const h = new Date(); return [isoLocal(h), isoLocal(h)]; },
+  mes: () => { const h = new Date(); return [isoLocal(new Date(h.getFullYear(), h.getMonth(), 1)), isoLocal(h)]; },
+  mesAnterior: () => { const h = new Date(); return [isoLocal(new Date(h.getFullYear(), h.getMonth() - 1, 1)), isoLocal(new Date(h.getFullYear(), h.getMonth(), 0))]; },
+  ultimos30: () => { const h = new Date(); const d = new Date(h); d.setDate(d.getDate() - 29); return [isoLocal(d), isoLocal(h)]; },
+};
+
+const tsInicio = (iso) => firebase.firestore.Timestamp.fromDate(new Date(iso + "T00:00:00"));
+const tsFin = (iso) => firebase.firestore.Timestamp.fromDate(new Date(iso + "T23:59:59.999"));
+const nfRep = (v) => Math.round(Number(v) || 0).toLocaleString("es-PY");
+
+function formatearCeldaReporte(col, v) {
+  if (v === null || v === undefined || v === "") return "";
+  if (col.tipo === "gs" || col.tipo === "num") return nfRep(v);
+  if (col.tipo === "pct") return (Number(v) || 0).toFixed(1).replace(".", ",") + " %";
+  return String(v);
+}
+
+function exportarReporteExcel({ nombreArchivo, hoja, columnas, filas, totales }) {
+  const mapear = (f) => {
+    const o = {};
+    columnas.forEach((c) => { o[c.label] = f[c.key] === undefined || f[c.key] === null ? "" : f[c.key]; });
+    return o;
+  };
+  const datos = filas.map(mapear);
+  if (totales) datos.push(mapear(totales));
+  const ws = XLSX.utils.json_to_sheet(datos);
+  ws["!cols"] = columnas.map((c) => ({ wch: Math.max(c.label.length + 2, c.tipo === "txt" ? 28 : 14) }));
+  const libro = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(libro, ws, (hoja || "Informe").slice(0, 31));
+  XLSX.writeFile(libro, `${nombreArchivo}.xlsx`);
+}
+
+async function exportarReportePDF({ nombreArchivo, titulo, subtitulo, columnas, filas, totales, empresaNombre, logoDataUrl, horizontal }) {
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ orientation: horizontal ? "landscape" : "portrait", unit: "mm", format: "a4" });
+  const margen = 12;
+  let y = 12;
+  let xTexto = margen;
+
+  if (logoDataUrl) {
+    const dims = await obtenerDimensionesImagen(logoDataUrl);
+    if (dims && dims.w > 0) {
+      let w = 26; let h = w * (dims.h / dims.w);
+      if (h > 14) { h = 14; w = h * (dims.w / dims.h); }
+      doc.addImage(logoDataUrl, /^data:image\/jpe?g/i.test(logoDataUrl) ? "JPEG" : "PNG", margen, y, w, h);
+      xTexto = margen + w + 6;
+    }
+  }
+  doc.setFont(undefined, "bold");
+  doc.setFontSize(13);
+  doc.text(empresaNombre || "", xTexto, y + 5);
+  doc.setFontSize(11);
+  doc.text(titulo, xTexto, y + 11);
+  doc.setFont(undefined, "normal");
+  doc.setFontSize(8.5);
+  doc.setTextColor(110, 103, 96);
+  doc.text(`${subtitulo || ""}${subtitulo ? " · " : ""}Generado el ${new Date().toLocaleString("es-PY")}`, xTexto, y + 16);
+  doc.setTextColor(0);
+
+  const cuerpo = filas.map((f) => columnas.map((c) => formatearCeldaReporte(c, f[c.key])));
+  const pie = totales ? [columnas.map((c) => formatearCeldaReporte(c, totales[c.key]))] : undefined;
+  const alinear = {};
+  columnas.forEach((c, i) => { if (c.tipo !== "txt") alinear[i] = { halign: "right" }; });
+
+  doc.autoTable({
+    startY: y + 22,
+    head: [columnas.map((c) => c.label)],
+    body: cuerpo,
+    foot: pie,
+    margin: { left: margen, right: margen },
+    styles: { fontSize: horizontal ? 7.5 : 8.5, cellPadding: 1.8 },
+    headStyles: { fillColor: [156, 59, 87], textColor: 255 },
+    footStyles: { fillColor: [235, 235, 235], textColor: 0, fontStyle: "bold" },
+    alternateRowStyles: { fillColor: [247, 245, 241] },
+    columnStyles: alinear,
+    didParseCell: (d) => {
+      if ((d.section === "head" || d.section === "foot") && alinear[d.column.index]) d.cell.styles.halign = "right";
+    },
+  });
+  const total = doc.getNumberOfPages();
+  for (let i = 1; i <= total; i++) {
+    doc.setPage(i);
+    doc.setFontSize(7.5);
+    doc.setTextColor(110, 103, 96);
+    const w = doc.internal.pageSize.getWidth();
+    const h = doc.internal.pageSize.getHeight();
+    doc.text(`Página ${i} de ${total}`, w - margen, h - 6, { align: "right" });
+  }
+  doc.save(`${nombreArchivo}.pdf`);
+}
+
+function ReporteFiltroPeriodo({ desde, hasta, onCambiar }) {
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-end" }}>
+      <div className="field" style={{ marginBottom: 0 }}>
+        <label>Desde</label>
+        <input type="date" value={desde} onChange={(e) => onCambiar(e.target.value, hasta)} />
+      </div>
+      <div className="field" style={{ marginBottom: 0 }}>
+        <label>Hasta</label>
+        <input type="date" value={hasta} onChange={(e) => onCambiar(desde, e.target.value)} />
+      </div>
+      {[["hoy", "Hoy"], ["mes", "Este mes"], ["mesAnterior", "Mes anterior"], ["ultimos30", "Últimos 30 días"]].map(([k, t]) => (
+        <button key={k} type="button" className="btn btn-secondary" style={{ width: "auto" }}
+          onClick={() => { const [d, h] = PRESETS_PERIODO[k](); onCambiar(d, h); }}>{t}</button>
+      ))}
+    </div>
+  );
+}
+
+function ReporteTabla({ columnas, filas, totales, cargando, vacio }) {
+  return (
+    <div className="table-scroll">
+      <table className="data-table">
+        <thead><tr>{columnas.map((c) => <th key={c.key} style={c.tipo !== "txt" ? { textAlign: "right" } : null}>{c.label}</th>)}</tr></thead>
+        <tbody>
+          {cargando ? (
+            <tr><td colSpan={columnas.length}>Cargando...</td></tr>
+          ) : filas.length === 0 ? (
+            <tr><td colSpan={columnas.length} style={{ color: "var(--color-text-soft)" }}>{vacio || "Sin datos para el período elegido."}</td></tr>
+          ) : filas.map((f, i) => (
+            <tr key={i}>{columnas.map((c) => <td key={c.key} style={c.tipo !== "txt" ? { textAlign: "right" } : null}>{formatearCeldaReporte(c, f[c.key])}</td>)}</tr>
+          ))}
+        </tbody>
+        {totales && filas.length > 0 ? (
+          <tfoot><tr>{columnas.map((c) => <td key={c.key} style={{ fontWeight: 700, ...(c.tipo !== "txt" ? { textAlign: "right" } : null) }}>{formatearCeldaReporte(c, totales[c.key])}</td>)}</tr></tfoot>
+        ) : null}
+      </table>
+    </div>
+  );
+}
+
+function ReporteKpis({ items }) {
+  return (
+    <div className="kpi-grid" style={{ marginBottom: 16 }}>
+      {items.map((k) => (
+        <div className="kpi-card" key={k.label}>
+          <div className="kpi-label">{k.label}</div>
+          <div className="kpi-value small">{k.value}</div>
+          {k.sub ? <div className="kpi-sub">{k.sub}</div> : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ReporteAcciones({ onExcel, onPdf, deshabilitado }) {
+  return (
+    <div style={{ display: "flex", gap: 8 }}>
+      <button type="button" className="btn btn-secondary" style={{ width: "auto" }} disabled={deshabilitado} onClick={onExcel}>Exportar Excel</button>
+      <button type="button" className="btn btn-secondary" style={{ width: "auto" }} disabled={deshabilitado} onClick={onPdf}>Exportar PDF</button>
+    </div>
+  );
+}
+
+/** Suma `valor` en el grupo `clave` de un mapa de acumuladores. */
+function acumularGrupo(mapa, clave, etiqueta, ventas, cantidad, monto) {
+  const g = mapa[clave] || (mapa[clave] = { grupo: etiqueta, ventas: 0, cantidad: 0, monto: 0 });
+  g.ventas += ventas; g.cantidad += cantidad; g.monto += monto;
+}
+
+/* ---------------- Informe de ventas ---------------- */
+
+function InformeVentasPage({ empresaNombre, logoDataUrl }) {
+  const [[desde, hasta], setRango] = useState(PRESETS_PERIODO.mes());
+  const [agrupar, setAgrupar] = useState("producto");
+  const [ventas, setVentas] = useState(null);
+  const [aviso, setAviso] = useState("");
+
+  useEffect(() => {
+    if (!desde || !hasta || desde > hasta) { setVentas([]); return; }
+    setVentas(null); setAviso("");
+    db.collection("ventas").where("fecha", ">=", tsInicio(desde)).where("fecha", "<=", tsFin(hasta)).orderBy("fecha", "desc").limit(5000).get()
+      .then((snap) => {
+        setVentas(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+        if (snap.size >= 5000) setAviso("Hay más de 5.000 ventas en el período: se muestran las 5.000 más recientes. Acotá las fechas.");
+      })
+      .catch((err) => { console.error(err); setVentas([]); setAviso("No se pudieron leer las ventas (revisá tus permisos)."); });
+  }, [desde, hasta]);
+
+  const lista = ventas || [];
+  const validas = lista.filter((v) => v.estado === "emitida");
+  const anuladas = lista.length - validas.length;
+  const total = validas.reduce((a, v) => a + (v.total || 0), 0);
+  const descuentos = validas.reduce((a, v) => a + (v.descuento || 0), 0);
+  const ivaTotal = validas.reduce((a, v) => a + ((v.liquidacionIva || calcularLiquidacionIva(v.items || [], v.descuento)).totalIva || 0), 0);
+  const credito = validas.reduce((a, v) => a + (v.condicion === "credito" ? (v.pagos || []).filter((p) => p.metodo === "credito").reduce((s, p) => s + p.monto, 0) : 0), 0);
+
+  const mapa = {};
+  validas.forEach((v) => {
+    const fecha = v.fecha && v.fecha.toDate ? v.fecha.toDate() : null;
+    const unidades = (v.items || []).reduce((a, it) => a + (it.cantidad || 0), 0);
+    if (agrupar === "producto") {
+      (v.items || []).forEach((it) => acumularGrupo(mapa, it.productoId, it.nombreProducto, 1, it.cantidad || 0, it.subtotal || 0));
+    } else if (agrupar === "pago") {
+      (v.pagos || []).forEach((p) => acumularGrupo(mapa, p.metodo, METODOS_PAGO[p.metodo] || p.metodo, 1, 0, p.monto || 0));
+    } else if (agrupar === "cliente") {
+      acumularGrupo(mapa, v.clienteId || "cf", v.clienteNombre || "Consumidor final", 1, unidades, v.total || 0);
+    } else if (agrupar === "usuario") {
+      acumularGrupo(mapa, v.usuarioId || "-", v.usuarioNombre || "—", 1, unidades, v.total || 0);
+    } else if (agrupar === "dia" && fecha) {
+      const k = isoLocal(fecha);
+      acumularGrupo(mapa, k, k.split("-").reverse().join("/"), 1, unidades, v.total || 0);
+    }
+  });
+  let grupos = Object.entries(mapa).map(([k, g]) => ({ clave: k, ...g }));
+  grupos = agrupar === "dia" ? grupos.sort((a, b) => (a.clave < b.clave ? -1 : 1)) : grupos.sort((a, b) => b.monto - a.monto);
+  const sumaGrupos = grupos.reduce((a, g) => a + g.monto, 0) || 1;
+  const filas = grupos.map((g) => ({ ...g, pct: (g.monto / sumaGrupos) * 100 }));
+
+  const etiquetaGrupo = { producto: "Producto", cliente: "Cliente", pago: "Forma de pago", dia: "Día", usuario: "Vendedor / usuario" }[agrupar];
+  const columnas = [
+    { key: "grupo", label: etiquetaGrupo, tipo: "txt" },
+    { key: "ventas", label: "N° de ventas", tipo: "num" },
+    ...(agrupar === "pago" ? [] : [{ key: "cantidad", label: "Unidades", tipo: "num" }]),
+    { key: "monto", label: "Monto (Gs.)", tipo: "gs" },
+    { key: "pct", label: "% del total", tipo: "pct" },
+  ];
+  const totales = { grupo: "TOTAL", ventas: agrupar === "producto" ? "" : validas.length, cantidad: filas.reduce((a, f) => a + f.cantidad, 0), monto: filas.reduce((a, f) => a + f.monto, 0), pct: filas.length ? 100 : "" };
+  const nombreArchivo = `informe-ventas-por-${agrupar}_${desde}_${hasta}`;
+  const subtitulo = `Período ${desde.split("-").reverse().join("/")} al ${hasta.split("-").reverse().join("/")} · agrupado por ${etiquetaGrupo.toLowerCase()}`;
+  const nota = agrupar === "producto" ? "Por producto se suma el valor de venta de cada ítem (antes del descuento general de la venta)." : "";
+
+  return (
+    <div>
+      <div className="page-header">
+        <div>
+          <h1>Informe de ventas</h1>
+          <p>Ventas emitidas del período. Las ventas anuladas no se cuentan.</p>
+        </div>
+        <ReporteAcciones
+          deshabilitado={!ventas || filas.length === 0}
+          onExcel={() => exportarReporteExcel({ nombreArchivo, hoja: "Ventas", columnas, filas, totales })}
+          onPdf={() => exportarReportePDF({ nombreArchivo, titulo: "Informe de ventas", subtitulo, columnas, filas, totales, empresaNombre, logoDataUrl })}
+        />
+      </div>
+
+      <div className="card">
+        <div className="card-body">
+          <ReporteFiltroPeriodo desde={desde} hasta={hasta} onCambiar={(d, h) => setRango([d, h])} />
+          <div className="field" style={{ maxWidth: 260, marginTop: 12, marginBottom: 0 }}>
+            <label>Agrupar por</label>
+            <select value={agrupar} onChange={(e) => setAgrupar(e.target.value)}>
+              <option value="producto">Producto</option>
+              <option value="cliente">Cliente</option>
+              <option value="pago">Forma de pago</option>
+              <option value="dia">Día</option>
+              <option value="usuario">Vendedor / usuario</option>
+            </select>
+          </div>
+          {aviso ? <div className="form-error" style={{ marginTop: 10 }}>{aviso}</div> : null}
+        </div>
+      </div>
+
+      <ReporteKpis items={[
+        { label: "Total vendido", value: formatoGs(total), sub: `${validas.length} ventas${anuladas ? ` · ${anuladas} anuladas` : ""}` },
+        { label: "Ticket promedio", value: formatoGs(validas.length ? total / validas.length : 0) },
+        { label: "Descuentos", value: formatoGs(descuentos) },
+        { label: "IVA incluido", value: formatoGs(ivaTotal) },
+        { label: "Ventas a crédito", value: formatoGs(credito) },
+      ]} />
+
+      <div className="card">
+        <ReporteTabla columnas={columnas} filas={filas} totales={totales} cargando={ventas === null} />
+        {nota ? <div className="card-body" style={{ fontSize: 12, color: "var(--color-text-soft)" }}>{nota}</div> : null}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Informe de stock ---------------- */
+
+function InformeStockPage({ empresaNombre, logoDataUrl }) {
+  const productos = useColeccionSimple("productos");
+  const depositos = useColeccionSimple("depositos");
+  const marcas = useColeccionSimple("marcas");
+  const categorias = useColeccionSimple("categorias");
+  const [depositoId, setDepositoId] = useState("");
+  const [marcaId, setMarcaId] = useState("");
+  const [categoriaId, setCategoriaId] = useState("");
+  const [soloConStock, setSoloConStock] = useState(true);
+  const [soloSinVentas, setSoloSinVentas] = useState(false);
+  const [vendido90, setVendido90] = useState(null); // mapa productoId -> unidades; null = cargando; false = sin permiso
+
+  useEffect(() => {
+    const d = new Date(); d.setDate(d.getDate() - 90);
+    db.collection("ventas").where("fecha", ">=", firebase.firestore.Timestamp.fromDate(d)).limit(5000).get()
+      .then((snap) => {
+        const m = {};
+        snap.docs.forEach((x) => {
+          const v = x.data();
+          if (v.estado !== "emitida") return;
+          (v.items || []).forEach((it) => { m[it.productoId] = (m[it.productoId] || 0) + (it.cantidad || 0); });
+        });
+        setVendido90(m);
+      })
+      .catch((err) => { console.warn(err.code); setVendido90(false); });
+  }, []);
+
+  const nombre = (lista, id) => (lista.find((x) => x.id === id) || {}).nombre || "";
+  const depActivos = depositos.filter((d) => d.activo !== false);
+  const depMostrar = depositoId ? depActivos.filter((d) => d.id === depositoId) : depActivos;
+
+  let filas = productos.filter((p) => p.activo !== false).map((p) => {
+    const por = p.stockPorDeposito || {};
+    const stock = depositoId ? (por[depositoId] || 0) : (typeof p.stockTotal === "number" ? p.stockTotal : Object.values(por).reduce((a, b) => a + b, 0));
+    const costo = typeof p.costoUltimo === "number" ? p.costoUltimo : null;
+    const vendido = vendido90 ? (vendido90[p.id] || 0) : null;
+    const fila = {
+      codigo: p.codigoInterno || "", producto: p.nombre || "", marca: nombre(marcas, p.marcaId), categoria: nombre(categorias, p.categoriaId),
+      stock, costo, valorCosto: costo != null ? stock * costo : null,
+      precio: p.precioMinorista != null ? Number(p.precioMinorista) : null,
+      valorVenta: p.precioMinorista != null ? stock * Number(p.precioMinorista) : null,
+      vendido, _marcaId: p.marcaId, _categoriaId: p.categoriaId,
+    };
+    depMostrar.forEach((d) => { fila["dep_" + d.id] = por[d.id] || 0; });
+    return fila;
+  });
+  if (marcaId) filas = filas.filter((f) => f._marcaId === marcaId);
+  if (categoriaId) filas = filas.filter((f) => f._categoriaId === categoriaId);
+  if (soloConStock) filas = filas.filter((f) => f.stock > 0);
+  if (soloSinVentas && vendido90) filas = filas.filter((f) => f.stock > 0 && f.vendido === 0);
+  filas.sort((a, b) => (b.valorCosto || 0) - (a.valorCosto || 0) || a.producto.localeCompare(b.producto));
+
+  const columnas = [
+    { key: "codigo", label: "Código", tipo: "txt" },
+    { key: "producto", label: "Producto", tipo: "txt" },
+    { key: "marca", label: "Marca", tipo: "txt" },
+    { key: "categoria", label: "Categoría", tipo: "txt" },
+    ...(depositoId ? [] : depMostrar.length > 1 ? depMostrar.map((d) => ({ key: "dep_" + d.id, label: d.nombre, tipo: "num" })) : []),
+    { key: "stock", label: depositoId ? "Stock (depósito)" : "Stock total", tipo: "num" },
+    { key: "costo", label: "Último costo", tipo: "gs" },
+    { key: "valorCosto", label: "Valor al costo", tipo: "gs" },
+    { key: "precio", label: "Precio minorista", tipo: "gs" },
+    { key: "valorVenta", label: "Valor a precio de venta", tipo: "gs" },
+    ...(vendido90 ? [{ key: "vendido", label: "Vendido 90 días", tipo: "num" }] : []),
+  ];
+  const sum = (k) => filas.reduce((a, f) => a + (f[k] || 0), 0);
+  const totales = { codigo: "TOTAL", producto: `${filas.length} productos`, stock: sum("stock"), valorCosto: sum("valorCosto"), valorVenta: sum("valorVenta") };
+  depMostrar.forEach((d) => { totales["dep_" + d.id] = sum("dep_" + d.id); });
+  const sinCosto = filas.filter((f) => f.stock > 0 && f.costo == null).length;
+  const hoy = isoLocal(new Date());
+  const nombreArchivo = `informe-stock_${hoy}`;
+  const subtitulo = `${depositoId ? "Depósito: " + nombre(depositos, depositoId) : "Todos los depósitos"}`;
+
+  return (
+    <div>
+      <div className="page-header">
+        <div>
+          <h1>Informe de stock</h1>
+          <p>Existencias por depósito, valorizadas al último costo y al precio minorista, con las unidades vendidas en los últimos 90 días.</p>
+        </div>
+        <ReporteAcciones
+          deshabilitado={filas.length === 0}
+          onExcel={() => exportarReporteExcel({ nombreArchivo, hoja: "Stock", columnas, filas, totales })}
+          onPdf={() => exportarReportePDF({ nombreArchivo, titulo: "Informe de stock", subtitulo, columnas, filas, totales, empresaNombre, logoDataUrl, horizontal: true })}
+        />
+      </div>
+
+      <div className="card">
+        <div className="card-body">
+          <div className="form-grid-2">
+            <div className="field">
+              <label>Depósito</label>
+              <select value={depositoId} onChange={(e) => setDepositoId(e.target.value)}>
+                <option value="">Todos</option>
+                {depActivos.map((d) => <option key={d.id} value={d.id}>{d.nombre}</option>)}
+              </select>
+            </div>
+            <div className="field">
+              <label>Marca</label>
+              <select value={marcaId} onChange={(e) => setMarcaId(e.target.value)}>
+                <option value="">Todas</option>
+                {marcas.filter((m) => m.activo !== false).map((m) => <option key={m.id} value={m.id}>{m.nombre}</option>)}
+              </select>
+            </div>
+            <div className="field">
+              <label>Categoría</label>
+              <select value={categoriaId} onChange={(e) => setCategoriaId(e.target.value)}>
+                <option value="">Todas</option>
+                {categorias.filter((c) => c.activo !== false).map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+              </select>
+            </div>
+          </div>
+          <label style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6 }}>
+            <input type="checkbox" checked={soloConStock} onChange={(e) => setSoloConStock(e.target.checked)} /> Solo productos con stock
+          </label>
+          <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <input type="checkbox" checked={soloSinVentas} disabled={!vendido90} onChange={(e) => setSoloSinVentas(e.target.checked)} />
+            Solo con stock y sin ventas en 90 días (baja rotación)
+          </label>
+        </div>
+      </div>
+
+      <ReporteKpis items={[
+        { label: "Productos", value: String(filas.length) },
+        { label: "Unidades en stock", value: nfRep(sum("stock")) },
+        { label: "Valor al costo", value: formatoGs(sum("valorCosto")), sub: sinCosto ? `${sinCosto} productos sin costo cargado` : "" },
+        { label: "Valor a precio de venta", value: formatoGs(sum("valorVenta")) },
+      ]} />
+
+      <div className="card">
+        <ReporteTabla columnas={columnas} filas={filas} totales={totales} cargando={false}
+          vacio="No hay productos para mostrar con estos filtros." />
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Informe de compras ---------------- */
+
+function InformeComprasPage({ empresaNombre, logoDataUrl }) {
+  const [[desde, hasta], setRango] = useState(PRESETS_PERIODO.mes());
+  const [agrupar, setAgrupar] = useState("proveedor");
+  const [recepciones, setRecepciones] = useState(null);
+  const [aviso, setAviso] = useState("");
+
+  useEffect(() => {
+    if (!desde || !hasta || desde > hasta) { setRecepciones([]); return; }
+    setRecepciones(null); setAviso("");
+    db.collection("recepciones").where("fecha", ">=", tsInicio(desde)).where("fecha", "<=", tsFin(hasta)).orderBy("fecha", "desc").limit(5000).get()
+      .then((snap) => setRecepciones(snap.docs.map((d) => ({ id: d.id, ...d.data() }))))
+      .catch((err) => { console.error(err); setRecepciones([]); setAviso("No se pudieron leer las compras (revisá tus permisos)."); });
+  }, [desde, hasta]);
+
+  const lista = recepciones || [];
+  const total = lista.reduce((a, r) => a + (r.total || 0), 0);
+  const credito = lista.filter((r) => r.condicion === "credito");
+  const totalCredito = credito.reduce((a, r) => a + (r.total || 0), 0);
+  const saldo = credito.reduce((a, r) => a + (r.saldoPendiente || 0), 0);
+
+  const mapa = {};
+  lista.forEach((r) => {
+    const fecha = r.fecha && r.fecha.toDate ? r.fecha.toDate() : null;
+    const unidades = (r.items || []).reduce((a, it) => a + (it.cantidad || 0), 0);
+    if (agrupar === "producto") {
+      (r.items || []).forEach((it) => acumularGrupo(mapa, it.productoId, it.nombreProducto, 1, it.cantidad || 0, it.subtotal || 0));
+    } else if (agrupar === "proveedor") {
+      acumularGrupo(mapa, r.proveedorId, r.proveedorNombre || "—", 1, unidades, r.total || 0);
+    } else if (agrupar === "condicion") {
+      const c = r.condicion === "credito" ? "Crédito" : "Contado";
+      acumularGrupo(mapa, c, c, 1, unidades, r.total || 0);
+    } else if (agrupar === "dia" && fecha) {
+      const k = isoLocal(fecha);
+      acumularGrupo(mapa, k, k.split("-").reverse().join("/"), 1, unidades, r.total || 0);
+    }
+  });
+  let grupos = Object.entries(mapa).map(([k, g]) => ({ clave: k, ...g }));
+  grupos = agrupar === "dia" ? grupos.sort((a, b) => (a.clave < b.clave ? -1 : 1)) : grupos.sort((a, b) => b.monto - a.monto);
+  const sumaGrupos = grupos.reduce((a, g) => a + g.monto, 0) || 1;
+  const filas = grupos.map((g) => ({ ...g, pct: (g.monto / sumaGrupos) * 100, promedio: g.cantidad ? g.monto / g.cantidad : 0 }));
+
+  const etiquetaGrupo = { proveedor: "Proveedor", producto: "Producto", condicion: "Condición de pago", dia: "Día" }[agrupar];
+  const columnas = [
+    { key: "grupo", label: etiquetaGrupo, tipo: "txt" },
+    { key: "ventas", label: "N° de recepciones", tipo: "num" },
+    { key: "cantidad", label: "Unidades", tipo: "num" },
+    ...(agrupar === "producto" ? [{ key: "promedio", label: "Costo promedio", tipo: "gs" }] : []),
+    { key: "monto", label: "Monto (Gs.)", tipo: "gs" },
+    { key: "pct", label: "% del total", tipo: "pct" },
+  ];
+  const totales = { grupo: "TOTAL", ventas: agrupar === "producto" ? "" : lista.length, cantidad: filas.reduce((a, f) => a + f.cantidad, 0), monto: filas.reduce((a, f) => a + f.monto, 0), pct: filas.length ? 100 : "" };
+  const nombreArchivo = `informe-compras-por-${agrupar}_${desde}_${hasta}`;
+  const subtitulo = `Período ${desde.split("-").reverse().join("/")} al ${hasta.split("-").reverse().join("/")} · agrupado por ${etiquetaGrupo.toLowerCase()}`;
+
+  return (
+    <div>
+      <div className="page-header">
+        <div>
+          <h1>Informe de compras</h1>
+          <p>Mercadería recibida en el período (Recepción de mercadería), al costo de la factura del proveedor.</p>
+        </div>
+        <ReporteAcciones
+          deshabilitado={!recepciones || filas.length === 0}
+          onExcel={() => exportarReporteExcel({ nombreArchivo, hoja: "Compras", columnas, filas, totales })}
+          onPdf={() => exportarReportePDF({ nombreArchivo, titulo: "Informe de compras", subtitulo, columnas, filas, totales, empresaNombre, logoDataUrl })}
+        />
+      </div>
+
+      <div className="card">
+        <div className="card-body">
+          <ReporteFiltroPeriodo desde={desde} hasta={hasta} onCambiar={(d, h) => setRango([d, h])} />
+          <div className="field" style={{ maxWidth: 260, marginTop: 12, marginBottom: 0 }}>
+            <label>Agrupar por</label>
+            <select value={agrupar} onChange={(e) => setAgrupar(e.target.value)}>
+              <option value="proveedor">Proveedor</option>
+              <option value="producto">Producto</option>
+              <option value="condicion">Condición de pago</option>
+              <option value="dia">Día</option>
+            </select>
+          </div>
+          {aviso ? <div className="form-error" style={{ marginTop: 10 }}>{aviso}</div> : null}
+        </div>
+      </div>
+
+      <ReporteKpis items={[
+        { label: "Total comprado", value: formatoGs(total), sub: `${lista.length} recepciones` },
+        { label: "Compras a crédito", value: formatoGs(totalCredito), sub: `${credito.length} facturas` },
+        { label: "Saldo pendiente de pago", value: formatoGs(saldo) },
+      ]} />
+
+      <div className="card">
+        <ReporteTabla columnas={columnas} filas={filas} totales={totales} cargando={recepciones === null} />
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Stock · Movimientos de stock (auditoría, solo lectura)               */
 /* Muestra el historial completo de movimientos generados por otras     */
 /* operaciones (por ahora, Traslado de mercadería; más adelante también */
@@ -5169,6 +5687,16 @@ function PageContent({ moduleKey, pageKey, currentUid, currentUserName, role, em
         ]}
       />
     );
+  }
+
+  if (moduleKey === "informes" && pageKey === "informe-ventas") {
+    return <InformeVentasPage empresaNombre={empresaNombre} logoDataUrl={logoDataUrl} />;
+  }
+  if (moduleKey === "informes" && pageKey === "informe-stock") {
+    return <InformeStockPage empresaNombre={empresaNombre} logoDataUrl={logoDataUrl} />;
+  }
+  if (moduleKey === "informes" && pageKey === "informe-compras") {
+    return <InformeComprasPage empresaNombre={empresaNombre} logoDataUrl={logoDataUrl} />;
   }
 
   if (moduleKey === "finanzas" && pageKey === "pagos") {
