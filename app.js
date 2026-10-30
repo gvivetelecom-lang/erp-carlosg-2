@@ -909,6 +909,10 @@ function ProductosPage({ empresaNombre, logoDataUrl }) {
   const [editing, setEditing] = useState(null);
   const [toast, setToast] = useState("");
   const [exportandoPdf, setExportandoPdf] = useState(false);
+  const [busqueda, setBusqueda] = useState("");
+  const [filtroMarca, setFiltroMarca] = useState("");
+  const [filtroCategoria, setFiltroCategoria] = useState("");
+  const [filtroEstado, setFiltroEstado] = useState("");
 
   const marcas = useColeccionSimple("marcas");
   const lineas = useColeccionSimple("lineas");
@@ -929,7 +933,7 @@ function ProductosPage({ empresaNombre, logoDataUrl }) {
 
   const handleExportarExcel = () => {
     try {
-      exportarProductosExcel({ items, marcas, lineas, categorias });
+      exportarProductosExcel({ items: filtrados, marcas, lineas, categorias });
     } catch (err) {
       console.error(err);
       showToast("No se pudo generar el Excel.");
@@ -939,7 +943,7 @@ function ProductosPage({ empresaNombre, logoDataUrl }) {
   const handleExportarPdf = async () => {
     setExportandoPdf(true);
     try {
-      await exportarProductosPDF({ items, marcas, lineas, categorias, empresaNombre, logoDataUrl });
+      await exportarProductosPDF({ items: filtrados, marcas, lineas, categorias, empresaNombre, logoDataUrl });
     } catch (err) {
       console.error(err);
       showToast("No se pudo generar el PDF.");
@@ -949,6 +953,25 @@ function ProductosPage({ empresaNombre, logoDataUrl }) {
   };
 
   const nombrePorId = (lista, id) => (lista.find((x) => x.id === id) || {}).nombre || "—";
+
+  // Búsqueda sin distinguir mayúsculas ni tildes; todas las palabras deben aparecer
+  // en código, nombre, códigos de barra, marca, línea o categoría.
+  const normalizarBusqueda = (t) => String(t || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const terminos = normalizarBusqueda(busqueda).split(/\s+/).filter(Boolean);
+  const hayFiltros = terminos.length > 0 || filtroMarca || filtroCategoria || filtroEstado;
+  const filtrados = items.filter((p) => {
+    if (filtroMarca && p.marcaId !== filtroMarca) return false;
+    if (filtroCategoria && p.categoriaId !== filtroCategoria) return false;
+    if (filtroEstado === "activo" && !p.activo) return false;
+    if (filtroEstado === "inactivo" && p.activo) return false;
+    if (terminos.length === 0) return true;
+    const pajar = normalizarBusqueda([
+      p.codigoInterno, p.nombre, p.codigoBarraPrincipal, (p.codigosBarraAdicionales || []).join(" "),
+      nombrePorId(marcas, p.marcaId), nombrePorId(lineas, p.lineaId), nombrePorId(categorias, p.categoriaId),
+    ].join(" "));
+    return terminos.every((t) => pajar.includes(t));
+  });
+  const limpiarFiltros = () => { setBusqueda(""); setFiltroMarca(""); setFiltroCategoria(""); setFiltroEstado(""); };
 
   const formatearGs = (valor) => valor != null ? `Gs. ${Number(valor).toLocaleString("es-PY")}` : "—";
 
@@ -989,15 +1012,58 @@ function ProductosPage({ empresaNombre, logoDataUrl }) {
           <p>Código interno autogenerado, código de barra, marca/línea/categoría y precios mayorista/minorista. El stock por depósito se carga con Recepción de mercadería (Compras) y se mueve entre depósitos con Traslado de mercadería.</p>
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button className="btn btn-secondary" style={{ width: "auto" }} onClick={handleExportarPdf} disabled={exportandoPdf || items.length === 0}>
+          <button className="btn btn-secondary" style={{ width: "auto" }} onClick={handleExportarPdf} disabled={exportandoPdf || filtrados.length === 0}>
             {exportandoPdf ? "Generando..." : "Exportar PDF"}
           </button>
-          <button className="btn btn-secondary" style={{ width: "auto" }} onClick={handleExportarExcel} disabled={items.length === 0}>
+          <button className="btn btn-secondary" style={{ width: "auto" }} onClick={handleExportarExcel} disabled={filtrados.length === 0}>
             Exportar Excel
           </button>
           <button className="btn btn-primary" style={{ width: "auto" }} onClick={() => setEditing({})}>
             + Nuevo
           </button>
+        </div>
+      </div>
+
+      <div className="card" style={{ marginBottom: 12 }}>
+        <div className="card-body" style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-end" }}>
+          <div className="field" style={{ marginBottom: 0, flex: "2 1 280px" }}>
+            <label>Buscar producto</label>
+            <input
+              type="search"
+              autoFocus
+              placeholder="Nombre, código interno, código de barra, marca, línea o categoría..."
+              value={busqueda}
+              onChange={(e) => setBusqueda(e.target.value)}
+            />
+          </div>
+          <div className="field" style={{ marginBottom: 0, flex: "1 1 160px" }}>
+            <label>Marca</label>
+            <select value={filtroMarca} onChange={(e) => setFiltroMarca(e.target.value)}>
+              <option value="">Todas</option>
+              {marcas.map((m) => <option key={m.id} value={m.id}>{m.nombre}</option>)}
+            </select>
+          </div>
+          <div className="field" style={{ marginBottom: 0, flex: "1 1 160px" }}>
+            <label>Categoría</label>
+            <select value={filtroCategoria} onChange={(e) => setFiltroCategoria(e.target.value)}>
+              <option value="">Todas</option>
+              {categorias.map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+            </select>
+          </div>
+          <div className="field" style={{ marginBottom: 0, flex: "1 1 120px" }}>
+            <label>Estado</label>
+            <select value={filtroEstado} onChange={(e) => setFiltroEstado(e.target.value)}>
+              <option value="">Todos</option>
+              <option value="activo">Activos</option>
+              <option value="inactivo">Inactivos</option>
+            </select>
+          </div>
+          {hayFiltros ? (
+            <button type="button" className="btn btn-secondary" style={{ width: "auto" }} onClick={limpiarFiltros}>Limpiar</button>
+          ) : null}
+        </div>
+        <div className="card-body" style={{ paddingTop: 0, fontSize: 12.5, color: "var(--color-text-soft)" }}>
+          {loading ? "" : hayFiltros ? `Mostrando ${filtrados.length} de ${items.length} productos. Los botones de exportar usan este resultado.` : `${items.length} productos`}
         </div>
       </div>
 
@@ -1030,7 +1096,11 @@ function ProductosPage({ empresaNombre, logoDataUrl }) {
                   Todavía no hay productos. Usá "+ Nuevo" para crear el primero
                   {marcas.length === 0 ? " (necesitás al menos una marca cargada)." : "."}
                 </td></tr>
-              ) : items.map((p) => (
+              ) : filtrados.length === 0 ? (
+                <tr><td colSpan={14} style={{ color: "var(--color-text-soft)" }}>
+                  Ningún producto coincide con la búsqueda.
+                </td></tr>
+              ) : filtrados.map((p) => (
                 <tr key={p.id}>
                   <td>
                     {p.imagenDataUrl ? (

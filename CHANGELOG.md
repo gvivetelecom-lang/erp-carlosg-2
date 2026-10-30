@@ -21,6 +21,10 @@ nuevas funcionalidades (sección 17.2 de la especificación funcional).
 - Los tres informes se exportan a Excel y a PDF (con logo y nombre de la
   empresa, totales y numeración de páginas).
 - Menú Informes: nueva entrada "Compras".
+- Productos: buscador (sin distinguir mayúsculas ni tildes; varias palabras
+  a la vez) por nombre, código interno, códigos de barra, marca, línea o
+  categoría; filtros por marca, categoría y estado. Exportar PDF/Excel
+  usa el resultado filtrado.
 
 ## [0.17.0] — Finanzas: Pagos a proveedores
 
