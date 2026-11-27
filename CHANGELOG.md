@@ -3,6 +3,60 @@
 Versionado semántico informal: patch para correcciones, minor para
 nuevas funcionalidades (sección 17.2 de la especificación funcional).
 
+## [0.20.0] — Salidas de mercadería (obsequios y probadores)
+
+### Agregado
+- Stock → Salidas (obsequios y probadores): registro de productos que
+  salen del depósito sin venta. Datos: tipo (obsequio o probador /
+  muestra), depósito, a quién se entrega, C.I./RUC, motivo, quién
+  autoriza, observaciones y productos con cantidad.
+- Cada salida descuenta el stock del depósito en la misma operación,
+  deja un movimiento de egreso en Movimientos de stock y toma el último
+  costo de cada producto para valorizar la salida.
+- Documento A4 para el legajo administrativo (PDF): empresa, número
+  SL-000001, datos de la salida, detalle con costo, total y tres líneas
+  de firma (entregado por, autorizado por, recibido por). Se puede
+  reimprimir desde el listado. Las salidas anuladas salen con marca
+  "ANULADO".
+- Anulación (admin y gerencia): repone el stock y deja constancia del
+  motivo.
+- Listado con búsqueda, filtros por tipo y estado, y exportación a Excel
+  (una fila por producto).
+- firestore.rules: nueva colección `salidasProductos` (hay que
+  republicar las reglas).
+- permissions.js: acción `stock.anular_salida`.
+
+## [0.19.0] — Bancos
+
+### Agregado
+- Finanzas → Bancos: alta y edición de cuentas bancarias (banco, alias,
+  N° de cuenta, titular, tipo, saldo inicial) con saldo actualizado en
+  cada movimiento; las cuentas se desactivan, no se borran.
+- Movimientos bancarios: depósito, retiro / débito (comisiones, gastos) y
+  transferencia entre cuentas propias (genera dos movimientos enlazados).
+- Cobros a clientes y pagos a proveedores: si la forma de pago no es
+  efectivo se elige la cuenta bancaria, y el movimiento se acredita o
+  debita en la misma operación (guarda el vínculo para poder anular).
+- Conciliación: tildar los movimientos que aparecen en el extracto
+  (uno por uno o todos los visibles), saldo en libros vs. saldo
+  conciliado y comparación contra el saldo del extracto bancario.
+- Extracto de movimientos con saldo corrido, exportable a Excel y PDF.
+- firestore.rules: nuevas colecciones `cuentasBancarias` y
+  `movimientosBancarios` (solo la marca de conciliación es editable).
+
+### Limitaciones conocidas
+- Las ventas del POS pagadas por transferencia o tarjeta todavía no se
+  acreditan solas en un banco: se registran con "Depósito".
+- Los cobros y pagos hechos antes de esta versión no tienen cuenta.
+
+## [0.18.1] — Buscador en Productos
+
+### Agregado
+- Productos: buscador (sin distinguir mayúsculas ni tildes; varias palabras
+  a la vez) por nombre, código interno, códigos de barra, marca, línea o
+  categoría; filtros por marca, categoría y estado, con contador y botón
+  "Limpiar". Exportar PDF/Excel usa el resultado filtrado.
+
 ## [0.18.0] — Informes de Ventas, Stock y Compras
 
 ### Agregado
@@ -21,10 +75,6 @@ nuevas funcionalidades (sección 17.2 de la especificación funcional).
 - Los tres informes se exportan a Excel y a PDF (con logo y nombre de la
   empresa, totales y numeración de páginas).
 - Menú Informes: nueva entrada "Compras".
-- Productos: buscador (sin distinguir mayúsculas ni tildes; varias palabras
-  a la vez) por nombre, código interno, códigos de barra, marca, línea o
-  categoría; filtros por marca, categoría y estado. Exportar PDF/Excel
-  usa el resultado filtrado.
 
 ## [0.17.0] — Finanzas: Pagos a proveedores
 

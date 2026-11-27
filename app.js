@@ -82,6 +82,7 @@ const MENU = [
       { key: "productos", label: "Productos" },
       { key: "depositos", label: "Depósitos" },
       { key: "traslados", label: "Traslado de mercadería" },
+      { key: "salidas", label: "Salidas (obsequios y probadores)" },
       { key: "movimientos", label: "Movimientos de stock" },
     ],
   },
@@ -96,7 +97,7 @@ const MENU = [
   {
     key: "finanzas", label: "Finanzas", icon: "FI",
     children: [
-      { key: "bancos", label: "Bancos", soon: true },
+      { key: "bancos", label: "Bancos" },
       { key: "cuentas-cobrar", label: "Cuentas a cobrar" },
       { key: "pagos", label: "Pagos a proveedores" },
     ],
@@ -3790,7 +3791,7 @@ function imputarCobro(ventasPendientes, monto) {
   return { imputaciones, sobrante: resto };
 }
 
-async function registrarCobro({ clienteId, monto, metodo, observaciones, imputaciones, usuarioId, usuarioNombre }) {
+async function registrarCobro({ clienteId, monto, metodo, observaciones, imputaciones, usuarioId, usuarioNombre, cuentaBancariaId }) {
   const montoTotal = imputaciones.reduce((a, x) => a + x.monto, 0);
   if (!(montoTotal > 0)) throw new Error("El monto a cobrar debe ser mayor a 0.");
 
@@ -3805,6 +3806,7 @@ async function registrarCobro({ clienteId, monto, metodo, observaciones, imputac
     const clienteDoc = await tx.get(clienteRef);
     const ventaDocs = await Promise.all(ventaRefs.map((r) => tx.get(r)));
     const contadorDoc = await tx.get(contadorRef);
+    const ctxBanco = cuentaBancariaId ? await leerContextoBanco(tx, [cuentaBancariaId]) : null;
 
     if (!clienteDoc.exists) throw new Error("El cliente ya no existe.");
     ventaDocs.forEach((vd, i) => {
@@ -3842,6 +3844,15 @@ async function registrarCobro({ clienteId, monto, metodo, observaciones, imputac
       usuarioId,
       usuarioNombre,
     };
+    if (ctxBanco) {
+      const mb = escribirMovBanco(tx, ctxBanco, cuentaBancariaId, {
+        tipo: "cobro", signo: 1, monto: montoTotal, concepto: `Cobro ${codigoCobro} · ${clienteDoc.data().nombre}`,
+        origen: "cobro", origenId: cobroRef.id, usuarioId, usuarioNombre,
+      });
+      cobro.cuentaBancariaId = cuentaBancariaId;
+      cobro.cuentaBancariaNombre = ctxBanco.cuentas[cuentaBancariaId].data.nombre;
+      cobro.movimientoBancarioId = mb.id;
+    }
     tx.set(contadorRef, { ultimo: siguiente }, { merge: true });
     tx.set(cobroRef, { ...cobro, fecha: firebase.firestore.FieldValue.serverTimestamp() });
     tx.set(movRef, {
@@ -3853,6 +3864,7 @@ async function registrarCobro({ clienteId, monto, metodo, observaciones, imputac
       concepto: `Cobro ${codigoCobro} · ${clienteDoc.data().nombre}`,
       monto: montoTotal,
       metodo,
+      cuentaBancariaId: cuentaBancariaId || null,
       usuarioId,
       usuarioNombre,
       fecha: firebase.firestore.FieldValue.serverTimestamp(),
@@ -3958,6 +3970,7 @@ function CobroModal({ cliente, usuarioId, usuarioNombre, onClose, onListo }) {
   const [ventas, setVentas] = useState(null); // null = cargando
   const [monto, setMonto] = useState("");
   const [metodo, setMetodo] = useState("efectivo");
+  const selBanco = useSeleccionCuentaBancaria(metodo);
   const [observaciones, setObservaciones] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -3986,6 +3999,7 @@ function CobroModal({ cliente, usuarioId, usuarioNombre, onClose, onListo }) {
     try {
       const cobro = await registrarCobro({
         clienteId: cliente.id, monto: montoNum, metodo, observaciones, imputaciones, usuarioId, usuarioNombre,
+        cuentaBancariaId: metodo === "efectivo" ? null : (selBanco.cuentaId || null),
       });
       onListo({ ...cobro, fechaLocal: new Date() });
     } catch (err) {
@@ -4040,6 +4054,7 @@ function CobroModal({ cliente, usuarioId, usuarioNombre, onClose, onListo }) {
                   </select>
                 </div>
               </div>
+              <SelectorCuentaBancaria metodo={metodo} sel={selBanco} etiqueta="Cuenta bancaria donde se acredita" />
               <div className="field">
                 <label>Observaciones (opcional)</label>
                 <input value={observaciones} onChange={(e) => setObservaciones(e.target.value)} placeholder="Ej: N° de transferencia, cheque..." />
@@ -4204,7 +4219,7 @@ function imputarPago(facturas, monto) {
   return { imputaciones, sobrante: resto };
 }
 
-async function registrarPagoProveedor({ proveedorId, metodo, observaciones, imputaciones, usuarioId, usuarioNombre }) {
+async function registrarPagoProveedor({ proveedorId, metodo, observaciones, imputaciones, usuarioId, usuarioNombre, cuentaBancariaId }) {
   const montoTotal = imputaciones.reduce((a, x) => a + x.monto, 0);
   if (!(montoTotal > 0)) throw new Error("El monto a pagar debe ser mayor a 0.");
 
@@ -4219,6 +4234,7 @@ async function registrarPagoProveedor({ proveedorId, metodo, observaciones, impu
     const proveedorDoc = await tx.get(proveedorRef);
     const recDocs = await Promise.all(recRefs.map((r) => tx.get(r)));
     const contadorDoc = await tx.get(contadorRef);
+    const ctxBanco = cuentaBancariaId ? await leerContextoBanco(tx, [cuentaBancariaId]) : null;
 
     if (!proveedorDoc.exists) throw new Error("El proveedor ya no existe.");
     recDocs.forEach((rd, i) => {
@@ -4250,6 +4266,15 @@ async function registrarPagoProveedor({ proveedorId, metodo, observaciones, impu
       usuarioId,
       usuarioNombre,
     };
+    if (ctxBanco) {
+      const mb = escribirMovBanco(tx, ctxBanco, cuentaBancariaId, {
+        tipo: "pago", signo: -1, monto: montoTotal, concepto: `Pago ${codigoPago} · ${proveedorDoc.data().nombre}`,
+        origen: "pago_proveedor", origenId: pagoRef.id, usuarioId, usuarioNombre,
+      });
+      pago.cuentaBancariaId = cuentaBancariaId;
+      pago.cuentaBancariaNombre = ctxBanco.cuentas[cuentaBancariaId].data.nombre;
+      pago.movimientoBancarioId = mb.id;
+    }
     tx.set(contadorRef, { ultimo: siguiente }, { merge: true });
     tx.set(pagoRef, { ...pago, fecha: firebase.firestore.FieldValue.serverTimestamp() });
     tx.set(movRef, {
@@ -4261,6 +4286,7 @@ async function registrarPagoProveedor({ proveedorId, metodo, observaciones, impu
       concepto: `Pago ${codigoPago} · ${proveedorDoc.data().nombre}`,
       monto: montoTotal,
       metodo,
+      cuentaBancariaId: cuentaBancariaId || null,
       usuarioId,
       usuarioNombre,
       fecha: firebase.firestore.FieldValue.serverTimestamp(),
@@ -4296,6 +4322,7 @@ function PagoProveedorModal({ proveedor, facturas, usuarioId, usuarioNombre, onC
   const totalPendiente = abiertas.reduce((a, f) => a + f.saldoPendiente, 0);
   const [monto, setMonto] = useState(String(totalPendiente));
   const [metodo, setMetodo] = useState("transferencia");
+  const selBanco = useSeleccionCuentaBancaria(metodo);
   const [observaciones, setObservaciones] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -4312,6 +4339,7 @@ function PagoProveedorModal({ proveedor, facturas, usuarioId, usuarioNombre, onC
     try {
       const pago = await registrarPagoProveedor({
         proveedorId: proveedor.id, metodo, observaciones, imputaciones, usuarioId, usuarioNombre,
+        cuentaBancariaId: metodo === "efectivo" ? null : (selBanco.cuentaId || null),
       });
       onListo({ ...pago, fechaLocal: new Date() });
     } catch (err) {
@@ -4364,6 +4392,7 @@ function PagoProveedorModal({ proveedor, facturas, usuarioId, usuarioNombre, onC
               </select>
             </div>
           </div>
+          <SelectorCuentaBancaria metodo={metodo} sel={selBanco} etiqueta="Cuenta bancaria desde la que se paga" />
           <div className="field">
             <label>Observaciones (opcional)</label>
             <input value={observaciones} onChange={(e) => setObservaciones(e.target.value)} placeholder="Ej: N° de transferencia, cheque..." />
@@ -4501,6 +4530,1320 @@ function PagosProveedoresPage({ currentUid, currentUserName }) {
           </div>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Stock · Salidas de mercadería (obsequios y probadores) — v0.20.0     */
+/* Registra productos que salen del depósito sin venta, descuenta el    */
+/* stock y emite un documento A4 para el legajo administrativo.         */
+/* ------------------------------------------------------------------ */
+
+const TIPOS_SALIDA = { obsequio: "Obsequio", probador: "Probador / muestra" };
+
+async function crearSalidaProductos({
+  tipo, depositoId, items, destinatario, destinatarioDocumento, motivo, autorizadoPor, observaciones, usuarioId, usuarioNombre,
+}) {
+  if (!TIPOS_SALIDA[tipo]) throw new Error("Elegí el tipo de salida.");
+  if (!depositoId) throw new Error("Elegí el depósito de salida.");
+  const ids = items.map((it) => it.productoId);
+  if (new Set(ids).size !== ids.length) throw new Error("Hay un producto repetido. Sumá las cantidades en una sola línea.");
+
+  const contadorRef = db.collection("contadores").doc("salidasProductos");
+  const contadorMovRef = db.collection("contadores").doc("movimientosStock");
+  const salidaRef = db.collection("salidasProductos").doc();
+  const productoRefs = items.map((it) => db.collection("productos").doc(it.productoId));
+  let resultado = null;
+
+  await db.runTransaction(async (tx) => {
+    const productoDocs = await Promise.all(productoRefs.map((r) => tx.get(r)));
+    const contadorDoc = await tx.get(contadorRef);
+    const contadorMovDoc = await tx.get(contadorMovRef);
+
+    const siguiente = (contadorDoc.exists ? contadorDoc.data().ultimo || 0 : 0) + 1;
+    let siguienteMov = contadorMovDoc.exists ? contadorMovDoc.data().ultimo || 0 : 0;
+    const codigoSalida = "SL-" + String(siguiente).padStart(6, "0");
+    const itemsGuardados = [];
+
+    items.forEach((it, idx) => {
+      const pd = productoDocs[idx];
+      if (!pd.exists) throw new Error("Uno de los productos ya no existe.");
+      const p = pd.data();
+      const stockPorDeposito = { ...(p.stockPorDeposito || {}) };
+      const actual = stockPorDeposito[depositoId] || 0;
+      if (actual < it.cantidad) {
+        throw new Error(`Stock insuficiente de "${p.nombre}" en el depósito (hay ${actual}, se pidió ${it.cantidad}).`);
+      }
+      stockPorDeposito[depositoId] = actual - it.cantidad;
+      const stockTotal = Object.values(stockPorDeposito).reduce((a, b) => a + b, 0);
+      tx.update(productoRefs[idx], { stockPorDeposito, stockTotal, actualizadoEn: firebase.firestore.FieldValue.serverTimestamp() });
+
+      siguienteMov += 1;
+      tx.set(db.collection("movimientosStock").doc(), {
+        codigoMovimiento: "M-" + String(siguienteMov).padStart(6, "0"),
+        tipo: "egreso",
+        productoId: it.productoId,
+        depositoOrigenId: depositoId,
+        depositoDestinoId: null,
+        cantidad: it.cantidad,
+        motivo: `${TIPOS_SALIDA[tipo]} ${codigoSalida}`,
+        salidaId: salidaRef.id,
+        codigoSalida,
+        usuarioId,
+        usuarioNombre,
+        fecha: firebase.firestore.FieldValue.serverTimestamp(),
+      });
+
+      const costo = typeof p.costoUltimo === "number" ? p.costoUltimo : null;
+      itemsGuardados.push({
+        productoId: it.productoId,
+        codigoInterno: p.codigoInterno || "",
+        nombreProducto: p.nombre,
+        cantidad: it.cantidad,
+        costoUnitario: costo,
+        subtotalCosto: costo !== null ? costo * it.cantidad : null,
+      });
+    });
+
+    const salida = {
+      codigoSalida,
+      tipo,
+      depositoId,
+      items: itemsGuardados,
+      totalUnidades: itemsGuardados.reduce((a, it) => a + it.cantidad, 0),
+      totalCosto: itemsGuardados.reduce((a, it) => a + (it.subtotalCosto || 0), 0),
+      itemsSinCosto: itemsGuardados.filter((it) => it.costoUnitario === null).length,
+      destinatario: destinatario || null,
+      destinatarioDocumento: destinatarioDocumento || null,
+      motivo,
+      autorizadoPor,
+      observaciones: observaciones || null,
+      estado: "emitida",
+      usuarioId,
+      usuarioNombre,
+    };
+    tx.set(contadorRef, { ultimo: siguiente }, { merge: true });
+    tx.set(contadorMovRef, { ultimo: siguienteMov }, { merge: true });
+    tx.set(salidaRef, { ...salida, fecha: firebase.firestore.FieldValue.serverTimestamp() });
+    resultado = { id: salidaRef.id, ...salida, fecha: null };
+  });
+  return resultado;
+}
+
+async function anularSalidaProductos({ salidaId, motivo, usuarioId, usuarioNombre }) {
+  const salidaRef = db.collection("salidasProductos").doc(salidaId);
+  const contadorMovRef = db.collection("contadores").doc("movimientosStock");
+
+  await db.runTransaction(async (tx) => {
+    const salidaDoc = await tx.get(salidaRef);
+    if (!salidaDoc.exists) throw new Error("La salida ya no existe.");
+    const s = salidaDoc.data();
+    if (s.estado !== "emitida") throw new Error("Esta salida ya está anulada.");
+    const productoRefs = (s.items || []).map((it) => db.collection("productos").doc(it.productoId));
+    const productoDocs = await Promise.all(productoRefs.map((r) => tx.get(r)));
+    const contadorMovDoc = await tx.get(contadorMovRef);
+    let siguienteMov = contadorMovDoc.exists ? contadorMovDoc.data().ultimo || 0 : 0;
+
+    (s.items || []).forEach((it, idx) => {
+      const pd = productoDocs[idx];
+      if (!pd.exists) return;
+      const stockPorDeposito = { ...(pd.data().stockPorDeposito || {}) };
+      stockPorDeposito[s.depositoId] = (stockPorDeposito[s.depositoId] || 0) + it.cantidad;
+      const stockTotal = Object.values(stockPorDeposito).reduce((a, b) => a + b, 0);
+      tx.update(productoRefs[idx], { stockPorDeposito, stockTotal, actualizadoEn: firebase.firestore.FieldValue.serverTimestamp() });
+      siguienteMov += 1;
+      tx.set(db.collection("movimientosStock").doc(), {
+        codigoMovimiento: "M-" + String(siguienteMov).padStart(6, "0"),
+        tipo: "ingreso",
+        productoId: it.productoId,
+        depositoOrigenId: null,
+        depositoDestinoId: s.depositoId,
+        cantidad: it.cantidad,
+        motivo: `Anulación de salida ${s.codigoSalida}`,
+        salidaId,
+        codigoSalida: s.codigoSalida,
+        usuarioId,
+        usuarioNombre,
+        fecha: firebase.firestore.FieldValue.serverTimestamp(),
+      });
+    });
+    tx.set(contadorMovRef, { ultimo: siguienteMov }, { merge: true });
+    tx.update(salidaRef, {
+      estado: "anulada",
+      motivoAnulacion: motivo,
+      anuladaPorId: usuarioId,
+      anuladaPorNombre: usuarioNombre,
+      anuladaEn: firebase.firestore.FieldValue.serverTimestamp(),
+    });
+  });
+}
+
+/** Documento A4 de salida de mercadería (obsequio / probador) para el legajo administrativo. */
+async function generarSalidaProductosPDF({ salida, nombreDeposito }) {
+  let empresa = {};
+  let sucursal = {};
+  try {
+    const cfg = await db.collection("configuracion").doc("general").get();
+    if (cfg.exists) empresa = cfg.data();
+  } catch (e) { console.warn(e); }
+  try {
+    const sn = await db.collection("sucursales").get();
+    const lista = sn.docs.map((d) => d.data()).filter((s) => s.activo !== false);
+    sucursal = lista.find((s) => s.predeterminada) || lista[0] || {};
+  } catch (e) { console.warn(e); }
+
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: "mm", format: "a4" });
+  const L = 10, R = 200, ANCHO = R - L, PIE_Y = 287;
+  const nf = (v) => Number(v || 0).toLocaleString("es-PY");
+  const p2 = (x) => String(x).padStart(2, "0");
+  const logoDataUrl = empresa.logoDataUrl || "";
+  const wEtq = (etq) => { doc.setFont(undefined, "bold"); return doc.getTextWidth(etq) + 2; };
+  const tipoTxt = TIPOS_SALIDA[salida.tipo] || salida.tipo;
+  const fecha = salida.fecha && salida.fecha.toDate ? salida.fecha.toDate() : (salida.fechaLocal || new Date());
+  const fechaTxt = `${p2(fecha.getDate())}/${p2(fecha.getMonth() + 1)}/${fecha.getFullYear()} ${p2(fecha.getHours())}:${p2(fecha.getMinutes())}`;
+
+  doc.setLineWidth(0.3);
+  doc.setDrawColor(0);
+
+  // Franja superior
+  doc.rect(L, 10, ANCHO, 6);
+  doc.setFont(undefined, "bold");
+  doc.setFontSize(8.5);
+  doc.text("COMPROBANTE DE SALIDA DE MERCADERÍA — DOCUMENTO INTERNO SIN VALIDEZ FISCAL", (L + R) / 2, 14.2, { align: "center" });
+
+  // Empresa (izq) y número (der)
+  const yEmp = 16, altoEmp = 38, xDiv = 135;
+  doc.rect(L, yEmp, ANCHO, altoEmp);
+  doc.line(xDiv, yEmp, xDiv, yEmp + altoEmp);
+  let y = yEmp + 4;
+  if (logoDataUrl) {
+    const dims = await obtenerDimensionesImagen(logoDataUrl);
+    if (dims && dims.w > 0) {
+      let w = 38, h = w * (dims.h / dims.w);
+      if (h > 16) { h = 16; w = h * (dims.w / dims.h); }
+      doc.addImage(logoDataUrl, /^data:image\/jpe?g/i.test(logoDataUrl) ? "JPEG" : "PNG", L + 3, y, w, h);
+      y += h + 3;
+    }
+  }
+  doc.setFont(undefined, "bold");
+  doc.setFontSize(10);
+  doc.text(empresa.empresaNombre || "", L + 3, y + 1);
+  y += 5;
+  doc.setFontSize(8);
+  const lineaEmpresa = (etq, val) => {
+    if (!val) return;
+    const t = doc.splitTextToSize(val, xDiv - L - 8 - wEtq(etq));
+    const x = L + 3 + wEtq(etq);
+    doc.setFont(undefined, "bold"); doc.text(etq, L + 3, y);
+    doc.setFont(undefined, "normal"); doc.text(t, x, y);
+    y += 3.6 * t.length;
+  };
+  lineaEmpresa("Dirección:", sucursal.direccion || empresa.empresaDireccion);
+  lineaEmpresa("Ciudad:", empresa.empresaCiudad);
+  lineaEmpresa("Teléfono:", empresa.empresaTelefono);
+
+  doc.setFontSize(8.5);
+  if (empresa.empresaRuc) {
+    doc.setFont(undefined, "bold"); doc.text("RUC:", xDiv + 4, yEmp + 6);
+    doc.setFont(undefined, "normal"); doc.text(String(empresa.empresaRuc), xDiv + 14, yEmp + 6);
+  }
+  doc.setFont(undefined, "bold");
+  doc.setFontSize(11.5);
+  doc.text("SALIDA DE MERCADERÍA", xDiv + 4, yEmp + 19);
+  doc.setFontSize(10);
+  doc.text(tipoTxt.toUpperCase(), xDiv + 4, yEmp + 26);
+  doc.setFontSize(12);
+  doc.text(salida.codigoSalida, xDiv + 4, yEmp + 34);
+
+  // Datos de la salida
+  const yDat = yEmp + altoEmp + 1.5;
+  let yc = yDat + 5;
+  doc.setFontSize(8.5);
+  const bloque = [];
+  const linea = (etq, val, max) => {
+    if (val === null || val === undefined || val === "") return;
+    bloque.push({ etq, lines: doc.splitTextToSize(String(val), (max || ANCHO) - 10 - wEtq(etq)) });
+  };
+  doc.setFont(undefined, "bold");
+  linea("Fecha de salida:", fechaTxt);
+  linea("Depósito de salida:", nombreDeposito);
+  linea("Tipo de salida:", tipoTxt);
+  linea(salida.tipo === "obsequio" ? "Entregado a:" : "Destino:", salida.destinatario);
+  linea("C.I. / RUC:", salida.destinatarioDocumento);
+  linea("Motivo / justificación:", salida.motivo);
+  linea("Autorizado por:", salida.autorizadoPor);
+  linea("Registrado por:", salida.usuarioNombre);
+  const altoDat = 4 + bloque.reduce((a, b) => a + 4.2 * b.lines.length, 0) + 2;
+  doc.rect(L, yDat, ANCHO, altoDat);
+  bloque.forEach((b) => {
+    const x = L + 3 + wEtq(b.etq);
+    doc.setFont(undefined, "bold"); doc.text(b.etq, L + 3, yc);
+    doc.setFont(undefined, "normal"); doc.text(b.lines, x, yc);
+    yc += 4.2 * b.lines.length;
+  });
+
+  // Detalle
+  const filas = (salida.items || []).map((it, i) => [
+    String(i + 1),
+    it.codigoInterno || "",
+    it.nombreProducto || "",
+    nf(it.cantidad),
+    it.costoUnitario !== null && it.costoUnitario !== undefined ? nf(it.costoUnitario) : "—",
+    it.subtotalCosto !== null && it.subtotalCosto !== undefined ? nf(it.subtotalCosto) : "—",
+  ]);
+  const altoCierre = 78; // totales + observaciones + firmas
+  doc.autoTable({
+    startY: yDat + altoDat + 3,
+    head: [["N°", "Código", "Descripción", "Cantidad", "Costo unitario (Gs.)", "Costo total (Gs.)"]],
+    body: filas,
+    foot: [["", "", "TOTAL", nf(salida.totalUnidades), "", nf(salida.totalCosto)]],
+    showFoot: "lastPage",
+    theme: "grid",
+    margin: { left: L, right: 210 - R, bottom: 297 - PIE_Y + 4 },
+    styles: { fontSize: 8, cellPadding: 1.6, lineColor: [0, 0, 0], lineWidth: 0.2, textColor: 0, valign: "middle" },
+    headStyles: { fillColor: [235, 235, 235], textColor: 0, halign: "center", fontStyle: "bold" },
+    footStyles: { fillColor: [245, 245, 245], textColor: 0, fontStyle: "bold" },
+    columnStyles: {
+      0: { cellWidth: 10, halign: "center" },
+      1: { cellWidth: 24 },
+      3: { cellWidth: 20, halign: "right" },
+      4: { cellWidth: 32, halign: "right" },
+      5: { cellWidth: 32, halign: "right" },
+    },
+  });
+
+  // Cierre: observaciones y firmas, siempre al pie de la última página
+  let yC = doc.lastAutoTable.finalY + 4;
+  if (yC + altoCierre > PIE_Y) { doc.addPage(); yC = 20; }
+  doc.setFontSize(8);
+  if (salida.itemsSinCosto > 0) {
+    doc.setFont(undefined, "italic");
+    doc.text(`Nota: ${salida.itemsSinCosto} producto(s) sin costo cargado en el sistema; no se valorizan en el total.`, L, yC);
+    yC += 5;
+  }
+  if (salida.observaciones) {
+    const xo = L + wEtq("Observaciones:");
+    doc.setFont(undefined, "bold"); doc.text("Observaciones:", L, yC);
+    doc.setFont(undefined, "normal");
+    const t = doc.splitTextToSize(salida.observaciones, ANCHO - (xo - L) - 2);
+    doc.text(t, xo, yC);
+    yC += 4.2 * t.length + 2;
+  }
+  if (salida.estado === "anulada") {
+    doc.setFont(undefined, "bold");
+    doc.setTextColor(180, 30, 30);
+    doc.text(`DOCUMENTO ANULADO — ${salida.motivoAnulacion || ""}`, L, yC);
+    doc.setTextColor(0);
+    yC += 6;
+  }
+  const yFirma = Math.max(yC + 22, PIE_Y - 34);
+  const ancho3 = (ANCHO - 12) / 3;
+  const firmas = [
+    ["Entregado por", salida.usuarioNombre || ""],
+    ["Autorizado por", salida.autorizadoPor || ""],
+    [salida.tipo === "obsequio" ? "Recibido por (nombre, C.I. y firma)" : "Recibido por (nombre y firma)", salida.destinatario || ""],
+  ];
+  firmas.forEach(([etq, nombre], i) => {
+    const x = L + i * (ancho3 + 6);
+    doc.setDrawColor(0);
+    doc.line(x, yFirma, x + ancho3, yFirma);
+    doc.setFont(undefined, "bold"); doc.setFontSize(8);
+    doc.text(etq, x + ancho3 / 2, yFirma + 4, { align: "center", maxWidth: ancho3 });
+    doc.setFont(undefined, "normal");
+    if (nombre) doc.text(doc.splitTextToSize(nombre, ancho3)[0], x + ancho3 / 2, yFirma + 8, { align: "center" });
+  });
+
+  // Marca de agua si está anulada y pie en todas las páginas
+  const total = doc.getNumberOfPages();
+  for (let i = 1; i <= total; i++) {
+    doc.setPage(i);
+    if (salida.estado === "anulada") {
+      doc.setTextColor(215, 215, 215);
+      doc.setFont(undefined, "bold");
+      doc.setFontSize(80);
+      doc.text("ANULADO", 105, 160, { align: "center", angle: 35 });
+      doc.setTextColor(0);
+    }
+    doc.setFont(undefined, "normal");
+    doc.setFontSize(7);
+    doc.setTextColor(110, 103, 96);
+    doc.text("Documento interno para el legajo administrativo. No es una factura ni tiene validez fiscal.", L, 291);
+    doc.text(`${salida.codigoSalida} · Página ${i} de ${total}`, R, 291, { align: "right" });
+    doc.setTextColor(0);
+  }
+  doc.save(`salida-${salida.codigoSalida}.pdf`);
+}
+
+function SalidaProductosForm({ depositos, usuarioNombre, onCancel, onCrear }) {
+  const productosTodos = useColeccionSimple("productos");
+  const productos = productosTodos.filter((p) => p.activo !== false);
+  const [tipo, setTipo] = useState("obsequio");
+  const [depositoId, setDepositoId] = useState("");
+  const [destinatario, setDestinatario] = useState("");
+  const [destinatarioDocumento, setDestinatarioDocumento] = useState("");
+  const [motivo, setMotivo] = useState("");
+  const [autorizadoPor, setAutorizadoPor] = useState("");
+  const [observaciones, setObservaciones] = useState("");
+  const [items, setItems] = useState([{ productoId: "", cantidad: "1" }]);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const stockEn = (productoId) => {
+    const p = productos.find((x) => x.id === productoId);
+    return p && depositoId ? (p.stockPorDeposito || {})[depositoId] || 0 : null;
+  };
+  const cambiarItem = (i, campo, valor) => setItems((arr) => arr.map((it, idx) => (idx === i ? { ...it, [campo]: valor } : it)));
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError("");
+    if (!depositoId) return setError("Elegí el depósito de salida.");
+    if (tipo === "obsequio" && !destinatario.trim()) return setError("Ingresá a quién se entrega el obsequio.");
+    if (motivo.trim().length < 3) return setError("Ingresá el motivo o justificación de la salida.");
+    if (!autorizadoPor.trim()) return setError("Ingresá quién autoriza la salida.");
+    const validos = items.filter((it) => it.productoId && Number(it.cantidad) > 0);
+    if (validos.length === 0) return setError("Agregá al menos un producto con cantidad mayor a 0.");
+    if (validos.some((it) => !Number.isInteger(Number(it.cantidad)))) return setError("Las cantidades deben ser números enteros.");
+    setSaving(true);
+    try {
+      await onCrear({
+        tipo, depositoId,
+        destinatario: destinatario.trim(), destinatarioDocumento: destinatarioDocumento.trim(),
+        motivo: motivo.trim(), autorizadoPor: autorizadoPor.trim(), observaciones: observaciones.trim(),
+        items: validos.map((it) => ({ productoId: it.productoId, cantidad: Number(it.cantidad) })),
+      });
+    } catch (err) {
+      console.error(err);
+      setError(err.message || "No se pudo registrar la salida.");
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div>
+      <div className="page-header">
+        <div>
+          <h1>Nueva salida de mercadería</h1>
+          <p>Descuenta el stock del depósito y genera el documento A4 para el legajo administrativo.</p>
+        </div>
+      </div>
+      <form onSubmit={handleSubmit}>
+        {error ? <div className="form-error">{error}</div> : null}
+        <div className="card">
+          <div className="card-body">
+            <div className="form-grid-2">
+              <div className="field">
+                <label>Tipo de salida</label>
+                <select value={tipo} onChange={(e) => setTipo(e.target.value)}>
+                  {Object.entries(TIPOS_SALIDA).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                </select>
+              </div>
+              <div className="field">
+                <label>Depósito de salida</label>
+                <select value={depositoId} onChange={(e) => setDepositoId(e.target.value)}>
+                  <option value="">— Elegir —</option>
+                  {depositos.filter((d) => d.activo !== false).map((d) => <option key={d.id} value={d.id}>{d.nombre}</option>)}
+                </select>
+              </div>
+              <div className="field">
+                <label>{tipo === "obsequio" ? "Entregado a (nombre)" : "Destino (opcional)"}</label>
+                <input value={destinatario} onChange={(e) => setDestinatario(e.target.value)}
+                  placeholder={tipo === "obsequio" ? "Ej: cliente, proveedor, influencer..." : "Ej: exhibidor del salón de ventas"} />
+              </div>
+              <div className="field">
+                <label>C.I. / RUC (opcional)</label>
+                <input value={destinatarioDocumento} onChange={(e) => setDestinatarioDocumento(e.target.value)} />
+              </div>
+              <div className="field">
+                <label>Autorizado por</label>
+                <input value={autorizadoPor} onChange={(e) => setAutorizadoPor(e.target.value)} placeholder="Nombre de quien autoriza" />
+              </div>
+              <div className="field">
+                <label>Registrado por</label>
+                <input value={usuarioNombre || ""} disabled />
+              </div>
+            </div>
+            <div className="field">
+              <label>Motivo / justificación</label>
+              <input value={motivo} onChange={(e) => setMotivo(e.target.value)}
+                placeholder={tipo === "obsequio" ? "Ej: obsequio por compra mayorista, cortesía comercial..." : "Ej: probador para exhibición en el salón de ventas"} />
+            </div>
+            <div className="field" style={{ marginBottom: 0 }}>
+              <label>Observaciones (opcional)</label>
+              <input value={observaciones} onChange={(e) => setObservaciones(e.target.value)} />
+            </div>
+          </div>
+        </div>
+
+        <div className="card">
+          <div className="card-header"><h3>Productos</h3></div>
+          <div className="card-body">
+            {items.map((it, i) => (
+              <div key={i} style={{ display: "flex", gap: 10, alignItems: "flex-start", marginBottom: 12 }}>
+                <div style={{ flex: 1 }}>
+                  <ProductoPicker productos={productos} value={it.productoId} onChange={(id) => cambiarItem(i, "productoId", id)} />
+                  {it.productoId && depositoId ? (
+                    <p style={{ fontSize: 11.5, color: "var(--color-text-soft)", margin: "4px 0 0" }}>Stock actual en el depósito: {stockEn(it.productoId)}</p>
+                  ) : null}
+                </div>
+                <input type="number" min="1" step="1" placeholder="Cantidad" style={{ width: 110 }}
+                  value={it.cantidad} onChange={(e) => cambiarItem(i, "cantidad", e.target.value)} />
+                <button type="button" className="icon-btn" disabled={items.length === 1}
+                  onClick={() => setItems((arr) => arr.filter((_, idx) => idx !== i))}>Quitar</button>
+              </div>
+            ))}
+            <button type="button" className="btn btn-secondary" style={{ width: "auto" }}
+              onClick={() => setItems((arr) => [...arr, { productoId: "", cantidad: "1" }])}>+ Agregar producto</button>
+          </div>
+        </div>
+
+        <div style={{ display: "flex", gap: 10 }}>
+          <button type="button" className="btn btn-secondary" style={{ width: "auto" }} onClick={onCancel}>Cancelar</button>
+          <button type="submit" className="btn btn-primary" style={{ width: "auto" }} disabled={saving}>
+            {saving ? "Registrando..." : "Registrar salida"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function SalidasProductosPage({ currentUid, currentUserName, role }) {
+  const depositos = useColeccionSimple("depositos");
+  const [salidas, setSalidas] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [creando, setCreando] = useState(false);
+  const [verDetalle, setVerDetalle] = useState(null);
+  const [filtroTipo, setFiltroTipo] = useState("");
+  const [filtroEstado, setFiltroEstado] = useState("");
+  const [busqueda, setBusqueda] = useState("");
+  const [motivoAnul, setMotivoAnul] = useState("");
+  const [errorAnul, setErrorAnul] = useState("");
+  const [anulando, setAnulando] = useState(false);
+  const [toast, setToast] = useState("");
+  const puedeAnular = hasActionAccess(role, "stock.anular_salida");
+
+  useEffect(() => {
+    const unsub = db.collection("salidasProductos").orderBy("fecha", "desc").limit(500).onSnapshot(
+      (snap) => { setSalidas(snap.docs.map((d) => ({ id: d.id, ...d.data() }))); setLoading(false); },
+      (err) => { console.error(err); setLoading(false); }
+    );
+    return () => unsub();
+  }, []);
+
+  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(""), 3000); };
+  const nombreDeposito = (id) => (depositos.find((d) => d.id === id) || {}).nombre || "—";
+  const norm = (t) => String(t || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+  const terminos = norm(busqueda).split(/\s+/).filter(Boolean);
+
+  const filtradas = salidas.filter((s) => {
+    if (filtroTipo && s.tipo !== filtroTipo) return false;
+    if (filtroEstado && s.estado !== filtroEstado) return false;
+    if (terminos.length === 0) return true;
+    const pajar = norm([s.codigoSalida, s.destinatario, s.motivo, s.autorizadoPor, (s.items || []).map((it) => it.nombreProducto + " " + it.codigoInterno).join(" ")].join(" "));
+    return terminos.every((t) => pajar.includes(t));
+  });
+  const validas = filtradas.filter((s) => s.estado === "emitida");
+
+  const handleCrear = async (datos) => {
+    const s = await crearSalidaProductos({ ...datos, usuarioId: currentUid, usuarioNombre: currentUserName });
+    setCreando(false);
+    showToast("Salida registrada. El stock ya se actualizó.");
+    setVerDetalle({ ...s, fechaLocal: new Date() });
+  };
+
+  const imprimir = async (s) => {
+    try { await generarSalidaProductosPDF({ salida: s, nombreDeposito: nombreDeposito(s.depositoId) }); }
+    catch (err) { console.error(err); showToast("No se pudo generar el PDF."); }
+  };
+
+  const confirmarAnulacion = async () => {
+    setErrorAnul("");
+    if (motivoAnul.trim().length < 3) return setErrorAnul("Escribí el motivo de la anulación.");
+    setAnulando(true);
+    try {
+      await anularSalidaProductos({ salidaId: verDetalle.id, motivo: motivoAnul.trim(), usuarioId: currentUid, usuarioNombre: currentUserName });
+      setVerDetalle(null); setMotivoAnul("");
+      showToast("Salida anulada. El stock fue repuesto.");
+    } catch (err) {
+      console.error(err);
+      setErrorAnul(err.message || "No se pudo anular.");
+    } finally { setAnulando(false); }
+  };
+
+  const exportarExcel = () => {
+    const filas = [];
+    validas.forEach((s) => (s.items || []).forEach((it) => {
+      filas.push({
+        salida: s.codigoSalida,
+        fechaTxt: s.fecha && s.fecha.toDate ? s.fecha.toDate().toLocaleDateString("es-PY") : "",
+        tipoTxt: TIPOS_SALIDA[s.tipo] || s.tipo,
+        deposito: nombreDeposito(s.depositoId),
+        destinatario: s.destinatario || "",
+        motivo: s.motivo || "",
+        autorizadoPor: s.autorizadoPor || "",
+        codigo: it.codigoInterno || "",
+        producto: it.nombreProducto,
+        cantidad: it.cantidad,
+        costoUnitario: it.costoUnitario !== null && it.costoUnitario !== undefined ? it.costoUnitario : "",
+        subtotalCosto: it.subtotalCosto !== null && it.subtotalCosto !== undefined ? it.subtotalCosto : "",
+      });
+    }));
+    const columnas = [
+      { key: "salida", label: "Salida", tipo: "txt" }, { key: "fechaTxt", label: "Fecha", tipo: "txt" },
+      { key: "tipoTxt", label: "Tipo", tipo: "txt" }, { key: "deposito", label: "Depósito", tipo: "txt" },
+      { key: "destinatario", label: "Destinatario", tipo: "txt" }, { key: "motivo", label: "Motivo", tipo: "txt" },
+      { key: "autorizadoPor", label: "Autorizado por", tipo: "txt" }, { key: "codigo", label: "Código", tipo: "txt" },
+      { key: "producto", label: "Producto", tipo: "txt" }, { key: "cantidad", label: "Cantidad", tipo: "num" },
+      { key: "costoUnitario", label: "Costo unitario", tipo: "gs" }, { key: "subtotalCosto", label: "Costo total", tipo: "gs" },
+    ];
+    exportarReporteExcel({
+      nombreArchivo: `salidas-mercaderia_${isoLocal(new Date())}`, hoja: "Salidas", columnas, filas,
+      totales: { salida: "TOTAL", cantidad: filas.reduce((a, f) => a + f.cantidad, 0), subtotalCosto: filas.reduce((a, f) => a + (f.subtotalCosto || 0), 0) },
+    });
+  };
+
+  if (creando) {
+    return <SalidaProductosForm depositos={depositos} usuarioNombre={currentUserName} onCancel={() => setCreando(false)} onCrear={handleCrear} />;
+  }
+
+  return (
+    <div>
+      <div className="page-header">
+        <div>
+          <h1>Salidas de mercadería</h1>
+          <p>Obsequios y probadores que salen del depósito sin venta. Cada salida descuenta stock y genera un documento A4 para el legajo administrativo.</p>
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button className="btn btn-secondary" style={{ width: "auto" }} disabled={validas.length === 0} onClick={exportarExcel}>Exportar Excel</button>
+          <button className="btn btn-primary" style={{ width: "auto" }} onClick={() => setCreando(true)}>+ Nueva salida</button>
+        </div>
+      </div>
+
+      <div className="card" style={{ marginBottom: 12 }}>
+        <div className="card-body" style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-end" }}>
+          <div className="field" style={{ marginBottom: 0, flex: "2 1 240px" }}>
+            <label>Buscar</label>
+            <input type="search" placeholder="Código, destinatario, motivo o producto..." value={busqueda} onChange={(e) => setBusqueda(e.target.value)} />
+          </div>
+          <div className="field" style={{ marginBottom: 0, flex: "1 1 150px" }}>
+            <label>Tipo</label>
+            <select value={filtroTipo} onChange={(e) => setFiltroTipo(e.target.value)}>
+              <option value="">Todos</option>
+              {Object.entries(TIPOS_SALIDA).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+            </select>
+          </div>
+          <div className="field" style={{ marginBottom: 0, flex: "1 1 130px" }}>
+            <label>Estado</label>
+            <select value={filtroEstado} onChange={(e) => setFiltroEstado(e.target.value)}>
+              <option value="">Todos</option>
+              <option value="emitida">Vigentes</option>
+              <option value="anulada">Anuladas</option>
+            </select>
+          </div>
+        </div>
+        <div className="card-body" style={{ paddingTop: 0, fontSize: 12.5, color: "var(--color-text-soft)" }}>
+          {validas.length} salidas vigentes · {nfRep(validas.reduce((a, s) => a + (s.totalUnidades || 0), 0))} unidades · {formatoGs(validas.reduce((a, s) => a + (s.totalCosto || 0), 0))} al costo
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="table-scroll">
+          <table className="data-table">
+            <thead>
+              <tr><th>Salida</th><th>Fecha</th><th>Tipo</th><th>Destinatario</th><th>Depósito</th><th>Unidades</th><th>Costo total</th><th>Estado</th><th></th></tr>
+            </thead>
+            <tbody>
+              {loading ? (
+                <tr><td colSpan={9}>Cargando...</td></tr>
+              ) : filtradas.length === 0 ? (
+                <tr><td colSpan={9} style={{ color: "var(--color-text-soft)" }}>
+                  {salidas.length === 0 ? 'Todavía no hay salidas. Usá "+ Nueva salida" para registrar un obsequio o un probador.' : "Ninguna salida coincide con el filtro."}
+                </td></tr>
+              ) : filtradas.map((s) => (
+                <tr key={s.id}>
+                  <td>{s.codigoSalida}</td>
+                  <td>{s.fecha && s.fecha.toDate ? s.fecha.toDate().toLocaleString("es-PY") : "—"}</td>
+                  <td>{TIPOS_SALIDA[s.tipo] || s.tipo}</td>
+                  <td>{s.destinatario || "—"}</td>
+                  <td>{nombreDeposito(s.depositoId)}</td>
+                  <td>{s.totalUnidades}</td>
+                  <td>{formatoGs(s.totalCosto)}</td>
+                  <td><span className={"status-pill " + (s.estado === "emitida" ? "active" : "inactive")}>{s.estado === "emitida" ? "Vigente" : "Anulada"}</span></td>
+                  <td>
+                    <div className="row-actions">
+                      <button className="icon-btn" onClick={() => { setVerDetalle(s); setMotivoAnul(""); setErrorAnul(""); }}>Ver</button>
+                      <button className="icon-btn" onClick={() => imprimir(s)}>Imprimir A4</button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {verDetalle ? (
+        <div className="modal-backdrop" onClick={(e) => { if (e.target === e.currentTarget) setVerDetalle(null); }}>
+          <div className="modal">
+            <div className="modal-header">
+              <h3>{verDetalle.codigoSalida} · {TIPOS_SALIDA[verDetalle.tipo] || verDetalle.tipo}</h3>
+              <button type="button" className="modal-close" onClick={() => setVerDetalle(null)}>×</button>
+            </div>
+            <div className="modal-body">
+              <p style={{ fontSize: 13, margin: "0 0 10px", lineHeight: 1.6 }}>
+                <strong>Depósito:</strong> {nombreDeposito(verDetalle.depositoId)}<br />
+                {verDetalle.destinatario ? <><strong>{verDetalle.tipo === "obsequio" ? "Entregado a:" : "Destino:"}</strong> {verDetalle.destinatario}{verDetalle.destinatarioDocumento ? ` (${verDetalle.destinatarioDocumento})` : ""}<br /></> : null}
+                <strong>Motivo:</strong> {verDetalle.motivo}<br />
+                <strong>Autorizado por:</strong> {verDetalle.autorizadoPor}<br />
+                <strong>Registrado por:</strong> {verDetalle.usuarioNombre || "—"}
+                {verDetalle.observaciones ? <><br /><strong>Observaciones:</strong> {verDetalle.observaciones}</> : null}
+              </p>
+              <div className="table-scroll">
+                <table className="data-table">
+                  <thead><tr><th>Producto</th><th>Cant.</th><th>Costo unit.</th><th>Costo total</th></tr></thead>
+                  <tbody>
+                    {(verDetalle.items || []).map((it, i) => (
+                      <tr key={i}>
+                        <td>{it.nombreProducto}</td><td>{it.cantidad}</td>
+                        <td>{it.costoUnitario !== null && it.costoUnitario !== undefined ? formatoGs(it.costoUnitario) : "—"}</td>
+                        <td>{it.subtotalCosto !== null && it.subtotalCosto !== undefined ? formatoGs(it.subtotalCosto) : "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p style={{ fontWeight: 600 }}>Total: {verDetalle.totalUnidades} unidades · {formatoGs(verDetalle.totalCosto)} al costo</p>
+              {verDetalle.estado === "anulada" ? (
+                <p style={{ color: "var(--color-danger)", fontSize: 13 }}>Anulada por {verDetalle.anuladaPorNombre || "—"}: {verDetalle.motivoAnulacion || "sin motivo"}</p>
+              ) : puedeAnular && verDetalle.id ? (
+                <div className="field" style={{ marginBottom: 0 }}>
+                  <label>Anular esta salida (repone el stock)</label>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <input value={motivoAnul} onChange={(e) => setMotivoAnul(e.target.value)} placeholder="Motivo de la anulación" />
+                    <button type="button" className="btn btn-secondary" style={{ width: "auto" }} disabled={anulando} onClick={confirmarAnulacion}>{anulando ? "Anulando..." : "Anular"}</button>
+                  </div>
+                  {errorAnul ? <div className="form-error" style={{ marginTop: 8 }}>{errorAnul}</div> : null}
+                </div>
+              ) : null}
+            </div>
+            <div className="modal-footer">
+              <button type="button" className="btn btn-secondary" style={{ width: "auto" }} onClick={() => setVerDetalle(null)}>Cerrar</button>
+              <button type="button" className="btn btn-primary" style={{ width: "auto" }} onClick={() => imprimir(verDetalle)}>Imprimir A4 (PDF)</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {toast ? <div className="toast">{toast}</div> : null}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Finanzas · Bancos (v0.19.0)                                          */
+/* Cuentas bancarias, movimientos (depósitos, retiros, transferencias,  */
+/* cobros y pagos acreditados/debitados) y conciliación.                */
+/* ------------------------------------------------------------------ */
+
+const TIPOS_CUENTA_BANCARIA = { corriente: "Cuenta corriente", ahorro: "Caja de ahorro", otra: "Otra" };
+const TIPOS_MOV_BANCARIO = {
+  deposito: "Depósito",
+  retiro: "Retiro / débito",
+  transferencia_entrada: "Transferencia recibida",
+  transferencia_salida: "Transferencia enviada",
+  cobro: "Cobro de cliente",
+  pago: "Pago a proveedor",
+};
+
+function useCuentasBancarias() {
+  const [cuentas, setCuentas] = useState([]);
+  useEffect(() => {
+    const unsub = db.collection("cuentasBancarias").orderBy("codigo").onSnapshot(
+      (snap) => setCuentas(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+      (err) => console.error(err)
+    );
+    return () => unsub();
+  }, []);
+  return cuentas;
+}
+
+/**
+ * Lee (dentro de una transacción) las cuentas bancarias indicadas y el
+ * contador de movimientos. Debe llamarse ANTES de cualquier escritura.
+ */
+async function leerContextoBanco(tx, cuentaIds) {
+  const contadorRef = db.collection("contadores").doc("movimientosBancarios");
+  const contadorDoc = await tx.get(contadorRef);
+  const cuentas = {};
+  for (const id of cuentaIds) {
+    const ref = db.collection("cuentasBancarias").doc(id);
+    const doc = await tx.get(ref);
+    if (!doc.exists) throw new Error("La cuenta bancaria ya no existe.");
+    if (doc.data().activo === false) throw new Error(`La cuenta ${doc.data().nombre} está inactiva.`);
+    cuentas[id] = { ref, data: doc.data(), saldo: doc.data().saldo || 0 };
+  }
+  return { contadorRef, ultimo: contadorDoc.exists ? contadorDoc.data().ultimo || 0 : 0, cuentas };
+}
+
+/** Escribe un movimiento bancario y actualiza el saldo de la cuenta (solo escrituras). */
+function escribirMovBanco(tx, ctx, cuentaId, d) {
+  const c = ctx.cuentas[cuentaId];
+  ctx.ultimo += 1;
+  const codigoMov = "MB-" + String(ctx.ultimo).padStart(6, "0");
+  const movRef = db.collection("movimientosBancarios").doc();
+  c.saldo += d.signo * d.monto;
+  tx.update(c.ref, { saldo: c.saldo, actualizadoEn: firebase.firestore.FieldValue.serverTimestamp() });
+  tx.set(movRef, {
+    codigoMov,
+    cuentaId,
+    cuentaNombre: c.data.nombre,
+    tipo: d.tipo,
+    signo: d.signo,
+    monto: d.monto,
+    concepto: d.concepto,
+    referencia: d.referencia || null,
+    origen: d.origen || "manual",
+    origenId: d.origenId || null,
+    transferenciaId: d.transferenciaId || null,
+    fechaMov: d.fechaMov || firebase.firestore.Timestamp.now(),
+    conciliado: false,
+    usuarioId: d.usuarioId,
+    usuarioNombre: d.usuarioNombre,
+    fecha: firebase.firestore.FieldValue.serverTimestamp(),
+  });
+  tx.set(ctx.contadorRef, { ultimo: ctx.ultimo }, { merge: true });
+  return { id: movRef.id, codigoMov };
+}
+
+const fechaMovDesdeIso = (iso) => firebase.firestore.Timestamp.fromDate(new Date(iso + "T12:00:00"));
+
+async function crearCuentaBancaria({ banco, nombre, numeroCuenta, titular, tipo, saldoInicial }) {
+  const contadorRef = db.collection("contadores").doc("cuentasBancarias");
+  const cuentaRef = db.collection("cuentasBancarias").doc();
+  await db.runTransaction(async (tx) => {
+    const cd = await tx.get(contadorRef);
+    const siguiente = (cd.exists ? cd.data().ultimo || 0 : 0) + 1;
+    tx.set(contadorRef, { ultimo: siguiente }, { merge: true });
+    tx.set(cuentaRef, {
+      codigo: "CTA-" + String(siguiente).padStart(3, "0"),
+      banco, nombre,
+      numeroCuenta: numeroCuenta || null,
+      titular: titular || null,
+      tipo,
+      saldoInicial,
+      saldo: saldoInicial,
+      activo: true,
+      creadoEn: firebase.firestore.FieldValue.serverTimestamp(),
+    });
+  });
+}
+
+async function registrarMovimientoBancarioManual({ cuentaId, tipo, monto, fecha, concepto, referencia, usuarioId, usuarioNombre }) {
+  if (!(monto > 0)) throw new Error("El monto debe ser mayor a 0.");
+  await db.runTransaction(async (tx) => {
+    const ctx = await leerContextoBanco(tx, [cuentaId]);
+    escribirMovBanco(tx, ctx, cuentaId, {
+      tipo, signo: tipo === "deposito" ? 1 : -1, monto, concepto, referencia,
+      fechaMov: fechaMovDesdeIso(fecha), usuarioId, usuarioNombre,
+    });
+  });
+}
+
+async function registrarTransferenciaBancaria({ origenId, destinoId, monto, fecha, concepto, referencia, usuarioId, usuarioNombre }) {
+  if (!(monto > 0)) throw new Error("El monto debe ser mayor a 0.");
+  if (!origenId || !destinoId || origenId === destinoId) throw new Error("Elegí dos cuentas distintas.");
+  const transferenciaId = db.collection("movimientosBancarios").doc().id;
+  await db.runTransaction(async (tx) => {
+    const ctx = await leerContextoBanco(tx, [origenId, destinoId]);
+    const nO = ctx.cuentas[origenId].data.nombre;
+    const nD = ctx.cuentas[destinoId].data.nombre;
+    const fechaMov = fechaMovDesdeIso(fecha);
+    escribirMovBanco(tx, ctx, origenId, {
+      tipo: "transferencia_salida", signo: -1, monto, concepto: concepto || `Transferencia a ${nD}`,
+      referencia, transferenciaId, fechaMov, usuarioId, usuarioNombre,
+    });
+    escribirMovBanco(tx, ctx, destinoId, {
+      tipo: "transferencia_entrada", signo: 1, monto, concepto: concepto || `Transferencia desde ${nO}`,
+      referencia, transferenciaId, fechaMov, usuarioId, usuarioNombre,
+    });
+  });
+}
+
+/** Selección de cuenta bancaria para cobros/pagos que no son en efectivo. */
+function useSeleccionCuentaBancaria(metodo) {
+  const todas = useCuentasBancarias();
+  const cuentas = todas.filter((c) => c.activo !== false);
+  const [cuentaId, setCuentaId] = useState("");
+  const [tocado, setTocado] = useState(false);
+  useEffect(() => {
+    if (metodo === "efectivo") { setCuentaId(""); setTocado(false); return; }
+    if (!tocado && !cuentaId && cuentas.length > 0) setCuentaId(cuentas[0].id);
+  }, [metodo, cuentas.length, tocado]);
+  return { cuentas, cuentaId, elegir: (v) => { setTocado(true); setCuentaId(v); } };
+}
+
+function SelectorCuentaBancaria({ metodo, sel, etiqueta }) {
+  if (metodo === "efectivo") return null;
+  return (
+    <div className="field">
+      <label>{etiqueta}</label>
+      <select value={sel.cuentaId} onChange={(e) => sel.elegir(e.target.value)}>
+        <option value="">No registrar en un banco</option>
+        {sel.cuentas.map((c) => <option key={c.id} value={c.id}>{c.banco} · {c.nombre}</option>)}
+      </select>
+      {sel.cuentas.length === 0 ? (
+        <div style={{ fontSize: 12, color: "var(--color-text-soft)", marginTop: 4 }}>
+          Todavía no hay cuentas bancarias cargadas (Finanzas → Bancos).
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function CuentaBancariaModal({ cuenta, onClose, onGuardar }) {
+  const esNueva = !cuenta;
+  const [banco, setBanco] = useState(cuenta ? cuenta.banco : "");
+  const [nombre, setNombre] = useState(cuenta ? cuenta.nombre : "");
+  const [numeroCuenta, setNumeroCuenta] = useState(cuenta ? cuenta.numeroCuenta || "" : "");
+  const [titular, setTitular] = useState(cuenta ? cuenta.titular || "" : "");
+  const [tipo, setTipo] = useState(cuenta ? cuenta.tipo : "corriente");
+  const [saldoInicial, setSaldoInicial] = useState("0");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const guardar = async () => {
+    setError("");
+    if (!banco.trim()) return setError("Ingresá el banco.");
+    if (!nombre.trim()) return setError("Ingresá un nombre o alias para la cuenta.");
+    setSaving(true);
+    try {
+      await onGuardar({
+        banco: banco.trim(), nombre: nombre.trim(), numeroCuenta: numeroCuenta.trim(), titular: titular.trim(), tipo,
+        saldoInicial: Math.round(Number(saldoInicial) || 0),
+      });
+    } catch (err) {
+      console.error(err);
+      setError("No se pudo guardar. Revisá los permisos.");
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="modal">
+        <div className="modal-header">
+          <h3>{esNueva ? "Nueva cuenta bancaria" : `Editar ${cuenta.codigo}`}</h3>
+          <button type="button" className="modal-close" onClick={onClose}>×</button>
+        </div>
+        <div className="modal-body">
+          {error ? <div className="form-error">{error}</div> : null}
+          <div className="form-grid-2">
+            <div className="field"><label>Banco</label><input value={banco} onChange={(e) => setBanco(e.target.value)} placeholder="Ej: Itaú, Continental, Ueno..." /></div>
+            <div className="field"><label>Nombre / alias</label><input value={nombre} onChange={(e) => setNombre(e.target.value)} placeholder="Ej: Cta. Cte. Gs. principal" /></div>
+            <div className="field"><label>N° de cuenta</label><input value={numeroCuenta} onChange={(e) => setNumeroCuenta(e.target.value)} /></div>
+            <div className="field"><label>Titular</label><input value={titular} onChange={(e) => setTitular(e.target.value)} /></div>
+            <div className="field">
+              <label>Tipo</label>
+              <select value={tipo} onChange={(e) => setTipo(e.target.value)}>
+                {Object.entries(TIPOS_CUENTA_BANCARIA).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+              </select>
+            </div>
+            {esNueva ? (
+              <div className="field">
+                <label>Saldo inicial (Gs.)</label>
+                <input type="number" step="1" value={saldoInicial} onChange={(e) => setSaldoInicial(e.target.value)} />
+              </div>
+            ) : (
+              <div className="field"><label>Saldo inicial (Gs.)</label><input value={formatoGs(cuenta.saldoInicial)} disabled /></div>
+            )}
+          </div>
+          {esNueva ? <p style={{ fontSize: 12, color: "var(--color-text-soft)" }}>El saldo inicial no se puede cambiar después: los ajustes se registran como depósito o retiro.</p> : null}
+        </div>
+        <div className="modal-footer">
+          <button type="button" className="btn btn-secondary" style={{ width: "auto" }} onClick={onClose}>Cancelar</button>
+          <button type="button" className="btn btn-primary" style={{ width: "auto" }} disabled={saving} onClick={guardar}>{saving ? "Guardando..." : "Guardar"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MovimientoBancarioModal({ modo, cuentas, cuentaInicialId, usuarioId, usuarioNombre, onClose, onListo }) {
+  const [cuentaId, setCuentaId] = useState(cuentaInicialId || (cuentas[0] && cuentas[0].id) || "");
+  const [destinoId, setDestinoId] = useState("");
+  const [monto, setMonto] = useState("");
+  const [fecha, setFecha] = useState(isoLocal(new Date()));
+  const [concepto, setConcepto] = useState("");
+  const [referencia, setReferencia] = useState("");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const titulo = { deposito: "Registrar depósito", retiro: "Registrar retiro / débito", transferencia: "Transferencia entre cuentas" }[modo];
+
+  const confirmar = async () => {
+    setError("");
+    const montoNum = Math.round(Number(monto) || 0);
+    if (!cuentaId) return setError("Elegí la cuenta.");
+    if (!(montoNum > 0)) return setError("Ingresá un monto mayor a 0.");
+    if (!fecha) return setError("Ingresá la fecha.");
+    if (modo !== "transferencia" && !concepto.trim()) return setError("Ingresá el concepto (ej: depósito de efectivo, comisión, gastos bancarios).");
+    if (modo === "transferencia" && (!destinoId || destinoId === cuentaId)) return setError("Elegí una cuenta de destino distinta del origen.");
+    setSaving(true);
+    try {
+      if (modo === "transferencia") {
+        await registrarTransferenciaBancaria({ origenId: cuentaId, destinoId, monto: montoNum, fecha, concepto: concepto.trim(), referencia: referencia.trim(), usuarioId, usuarioNombre });
+      } else {
+        await registrarMovimientoBancarioManual({ cuentaId, tipo: modo, monto: montoNum, fecha, concepto: concepto.trim(), referencia: referencia.trim(), usuarioId, usuarioNombre });
+      }
+      onListo("Movimiento registrado.");
+    } catch (err) {
+      console.error(err);
+      setError(err.message || "No se pudo registrar el movimiento.");
+      setSaving(false);
+    }
+  };
+
+  const opciones = cuentas.map((c) => <option key={c.id} value={c.id}>{c.banco} · {c.nombre} ({formatoGs(c.saldo)})</option>);
+  return (
+    <div className="modal-backdrop" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="modal">
+        <div className="modal-header">
+          <h3>{titulo}</h3>
+          <button type="button" className="modal-close" onClick={onClose}>×</button>
+        </div>
+        <div className="modal-body">
+          {error ? <div className="form-error">{error}</div> : null}
+          <div className="form-grid-2">
+            <div className="field">
+              <label>{modo === "transferencia" ? "Cuenta de origen" : "Cuenta"}</label>
+              <select value={cuentaId} onChange={(e) => setCuentaId(e.target.value)}>{opciones}</select>
+            </div>
+            {modo === "transferencia" ? (
+              <div className="field">
+                <label>Cuenta de destino</label>
+                <select value={destinoId} onChange={(e) => setDestinoId(e.target.value)}>
+                  <option value="">Elegir...</option>
+                  {cuentas.filter((c) => c.id !== cuentaId).map((c) => <option key={c.id} value={c.id}>{c.banco} · {c.nombre}</option>)}
+                </select>
+              </div>
+            ) : null}
+            <div className="field"><label>Monto (Gs.)</label><input type="number" min="1" step="1" value={monto} onChange={(e) => setMonto(e.target.value)} /></div>
+            <div className="field"><label>Fecha del movimiento</label><input type="date" value={fecha} onChange={(e) => setFecha(e.target.value)} /></div>
+          </div>
+          <div className="field">
+            <label>Concepto{modo === "transferencia" ? " (opcional)" : ""}</label>
+            <input value={concepto} onChange={(e) => setConcepto(e.target.value)} placeholder={modo === "deposito" ? "Ej: Depósito de efectivo de ventas" : modo === "retiro" ? "Ej: Comisión de mantenimiento" : ""} />
+          </div>
+          <div className="field">
+            <label>N° de boleta / operación (opcional)</label>
+            <input value={referencia} onChange={(e) => setReferencia(e.target.value)} />
+          </div>
+        </div>
+        <div className="modal-footer">
+          <button type="button" className="btn btn-secondary" style={{ width: "auto" }} onClick={onClose}>Cancelar</button>
+          <button type="button" className="btn btn-primary" style={{ width: "auto" }} disabled={saving} onClick={confirmar}>{saving ? "Registrando..." : "Registrar"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BancosCuentasTab({ cuentas, onNueva, onEditar, onToggle, onMovimiento, onVerMovimientos }) {
+  const totalSaldo = cuentas.filter((c) => c.activo !== false).reduce((a, c) => a + (c.saldo || 0), 0);
+  return (
+    <div>
+      <ReporteKpis items={[
+        { label: "Saldo total en bancos", value: formatoGs(totalSaldo), sub: `${cuentas.filter((c) => c.activo !== false).length} cuentas activas` },
+      ]} />
+      <div className="card">
+        <div className="table-scroll">
+          <table className="data-table">
+            <thead><tr><th>Código</th><th>Banco</th><th>Cuenta</th><th>N° de cuenta</th><th>Titular</th><th>Tipo</th><th style={{ textAlign: "right" }}>Saldo</th><th>Estado</th><th></th></tr></thead>
+            <tbody>
+              {cuentas.length === 0 ? (
+                <tr><td colSpan={9} style={{ color: "var(--color-text-soft)" }}>Todavía no hay cuentas. Usá "+ Nueva cuenta".</td></tr>
+              ) : cuentas.map((c) => (
+                <tr key={c.id}>
+                  <td>{c.codigo}</td>
+                  <td>{c.banco}</td>
+                  <td>{c.nombre}</td>
+                  <td>{c.numeroCuenta || "—"}</td>
+                  <td>{c.titular || "—"}</td>
+                  <td>{TIPOS_CUENTA_BANCARIA[c.tipo] || c.tipo}</td>
+                  <td style={{ textAlign: "right", fontWeight: 600, color: (c.saldo || 0) < 0 ? "var(--color-danger)" : undefined }}>{formatoGs(c.saldo)}</td>
+                  <td><span className={"status-pill " + (c.activo !== false ? "active" : "inactive")}>{c.activo !== false ? "Activa" : "Inactiva"}</span></td>
+                  <td>
+                    <div className="row-actions">
+                      <button className="icon-btn" onClick={() => onVerMovimientos(c.id)}>Movimientos</button>
+                      <button className="icon-btn" onClick={() => onEditar(c)}>Editar</button>
+                      <button className="icon-btn" onClick={() => onToggle(c)}>{c.activo !== false ? "Desactivar" : "Activar"}</button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BancosMovimientosTab({ cuentas, cuentaId, setCuentaId, puedeConciliar, usuarioId, usuarioNombre, empresaNombre, logoDataUrl, showToast }) {
+  const [movs, setMovs] = useState(null);
+  const [[desde, hasta], setRango] = useState(["", ""]);
+  const [estado, setEstado] = useState("");
+  const [extracto, setExtracto] = useState("");
+  const cuenta = cuentas.find((c) => c.id === cuentaId);
+
+  useEffect(() => {
+    if (!cuentaId) { setMovs([]); return; }
+    setMovs(null);
+    const unsub = db.collection("movimientosBancarios").where("cuentaId", "==", cuentaId).limit(5000).onSnapshot(
+      (snap) => setMovs(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+      (err) => { console.error(err); setMovs([]); }
+    );
+    return () => unsub();
+  }, [cuentaId]);
+
+  const seg = (t) => (t && t.seconds) || 0;
+  // Orden cronológico para calcular el saldo corrido; se muestra del más nuevo al más viejo.
+  const cron = [...(movs || [])].sort((a, b) => seg(a.fechaMov) - seg(b.fechaMov) || seg(a.fecha) - seg(b.fecha));
+  let acum = cuenta ? cuenta.saldoInicial || 0 : 0;
+  const conSaldo = cron.map((m) => { acum += m.signo * m.monto; return { ...m, saldoCorrido: acum }; }).reverse();
+  const visibles = conSaldo.filter((m) => {
+    const iso = m.fechaMov && m.fechaMov.toDate ? isoLocal(m.fechaMov.toDate()) : "";
+    if (desde && iso < desde) return false;
+    if (hasta && iso > hasta) return false;
+    if (estado === "pendiente" && m.conciliado) return false;
+    if (estado === "conciliado" && !m.conciliado) return false;
+    return true;
+  });
+
+  const saldoConciliado = (cuenta ? cuenta.saldoInicial || 0 : 0) + (movs || []).filter((m) => m.conciliado).reduce((a, m) => a + m.signo * m.monto, 0);
+  const pendientes = (movs || []).filter((m) => !m.conciliado);
+  const netoPendiente = pendientes.reduce((a, m) => a + m.signo * m.monto, 0);
+  const extractoNum = extracto === "" ? null : Math.round(Number(extracto));
+  const diferencia = extractoNum === null ? null : extractoNum - saldoConciliado;
+
+  const marcar = async (lista, valor) => {
+    try {
+      const campos = valor
+        ? { conciliado: true, conciliadoEn: firebase.firestore.FieldValue.serverTimestamp(), conciliadoPorId: usuarioId, conciliadoPorNombre: usuarioNombre }
+        : { conciliado: false, conciliadoEn: null, conciliadoPorId: null, conciliadoPorNombre: null };
+      for (let i = 0; i < lista.length; i += 400) {
+        const batch = db.batch();
+        lista.slice(i, i + 400).forEach((m) => batch.update(db.collection("movimientosBancarios").doc(m.id), campos));
+        await batch.commit();
+      }
+    } catch (err) {
+      console.error(err);
+      showToast("No se pudo actualizar la conciliación. Revisá los permisos.");
+    }
+  };
+
+  const fmtFecha = (t) => (t && t.toDate ? t.toDate().toLocaleDateString("es-PY") : "—");
+  const columnas = [
+    { key: "fechaTxt", label: "Fecha", tipo: "txt" },
+    { key: "codigoMov", label: "Código", tipo: "txt" },
+    { key: "concepto", label: "Concepto", tipo: "txt" },
+    { key: "tipoTxt", label: "Tipo", tipo: "txt" },
+    { key: "referencia", label: "Referencia", tipo: "txt" },
+    { key: "ingreso", label: "Ingreso", tipo: "gs" },
+    { key: "egreso", label: "Egreso", tipo: "gs" },
+    { key: "saldoCorrido", label: "Saldo", tipo: "gs" },
+    { key: "concTxt", label: "Conciliado", tipo: "txt" },
+  ];
+  const filasExport = visibles.map((m) => ({
+    fechaTxt: fmtFecha(m.fechaMov), codigoMov: m.codigoMov, concepto: m.concepto, tipoTxt: TIPOS_MOV_BANCARIO[m.tipo] || m.tipo,
+    referencia: m.referencia || "", ingreso: m.signo > 0 ? m.monto : "", egreso: m.signo < 0 ? m.monto : "",
+    saldoCorrido: m.saldoCorrido, concTxt: m.conciliado ? "Sí" : "No",
+  }));
+  const totalesExport = {
+    fechaTxt: "TOTAL", concepto: `${visibles.length} movimientos`,
+    ingreso: visibles.filter((m) => m.signo > 0).reduce((a, m) => a + m.monto, 0),
+    egreso: visibles.filter((m) => m.signo < 0).reduce((a, m) => a + m.monto, 0),
+  };
+  const nombreArchivo = `movimientos-bancarios_${cuenta ? cuenta.codigo : ""}_${isoLocal(new Date())}`;
+  const subtitulo = cuenta ? `${cuenta.banco} · ${cuenta.nombre}${cuenta.numeroCuenta ? " · " + cuenta.numeroCuenta : ""}` : "";
+
+  return (
+    <div>
+      <div className="card">
+        <div className="card-body" style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-end" }}>
+          <div className="field" style={{ marginBottom: 0, flex: "2 1 240px" }}>
+            <label>Cuenta</label>
+            <select value={cuentaId} onChange={(e) => setCuentaId(e.target.value)}>
+              {cuentas.map((c) => <option key={c.id} value={c.id}>{c.banco} · {c.nombre}</option>)}
+            </select>
+          </div>
+          <div className="field" style={{ marginBottom: 0 }}><label>Desde</label><input type="date" value={desde} onChange={(e) => setRango([e.target.value, hasta])} /></div>
+          <div className="field" style={{ marginBottom: 0 }}><label>Hasta</label><input type="date" value={hasta} onChange={(e) => setRango([desde, e.target.value])} /></div>
+          <div className="field" style={{ marginBottom: 0 }}>
+            <label>Conciliación</label>
+            <select value={estado} onChange={(e) => setEstado(e.target.value)}>
+              <option value="">Todos</option>
+              <option value="pendiente">Pendientes</option>
+              <option value="conciliado">Conciliados</option>
+            </select>
+          </div>
+          <ReporteAcciones
+            deshabilitado={visibles.length === 0}
+            onExcel={() => exportarReporteExcel({ nombreArchivo, hoja: "Movimientos", columnas, filas: filasExport, totales: totalesExport })}
+            onPdf={() => exportarReportePDF({ nombreArchivo, titulo: "Movimientos bancarios", subtitulo, columnas, filas: filasExport, totales: totalesExport, empresaNombre, logoDataUrl, horizontal: true })}
+          />
+        </div>
+      </div>
+
+      {cuenta ? (
+        <ReporteKpis items={[
+          { label: "Saldo en libros", value: formatoGs(cuenta.saldo), sub: "Según los movimientos registrados" },
+          { label: "Saldo conciliado", value: formatoGs(saldoConciliado), sub: "Solo movimientos tildados" },
+          { label: "Pendientes de conciliar", value: String(pendientes.length), sub: `Neto ${formatoGs(netoPendiente)}` },
+        ]} />
+      ) : null}
+
+      {cuenta ? (
+        <div className="card" style={{ marginBottom: 12 }}>
+          <div className="card-body" style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "flex-end" }}>
+            <div className="field" style={{ marginBottom: 0, maxWidth: 260 }}>
+              <label>Saldo según extracto bancario (Gs.)</label>
+              <input type="number" step="1" value={extracto} onChange={(e) => setExtracto(e.target.value)} placeholder="Opcional, para comparar" />
+            </div>
+            {diferencia !== null ? (
+              <div style={{ fontSize: 13.5, paddingBottom: 8, color: diferencia === 0 ? "var(--color-success)" : "var(--color-danger)" }}>
+                {diferencia === 0
+                  ? "El extracto coincide con el saldo conciliado."
+                  : `Diferencia contra el saldo conciliado: ${formatoGs(diferencia)}. Revisá los movimientos que faltan tildar o registrar.`}
+              </div>
+            ) : null}
+            {puedeConciliar && visibles.some((m) => !m.conciliado) ? (
+              <button type="button" className="btn btn-secondary" style={{ width: "auto", marginLeft: "auto" }}
+                onClick={() => marcar(visibles.filter((m) => !m.conciliado), true)}>
+                Conciliar los {visibles.filter((m) => !m.conciliado).length} pendientes visibles
+              </button>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
+      <div className="card">
+        <div className="table-scroll">
+          <table className="data-table">
+            <thead>
+              <tr>
+                {puedeConciliar ? <th>Conc.</th> : null}
+                <th>Fecha</th><th>Código</th><th>Concepto</th><th>Tipo</th><th>Referencia</th>
+                <th style={{ textAlign: "right" }}>Ingreso</th><th style={{ textAlign: "right" }}>Egreso</th><th style={{ textAlign: "right" }}>Saldo</th>
+                {!puedeConciliar ? <th>Conciliado</th> : null}
+              </tr>
+            </thead>
+            <tbody>
+              {!cuenta ? (
+                <tr><td colSpan={10} style={{ color: "var(--color-text-soft)" }}>Primero cargá una cuenta bancaria.</td></tr>
+              ) : movs === null ? (
+                <tr><td colSpan={10}>Cargando...</td></tr>
+              ) : visibles.length === 0 ? (
+                <tr><td colSpan={10} style={{ color: "var(--color-text-soft)" }}>No hay movimientos para mostrar.</td></tr>
+              ) : visibles.map((m) => (
+                <tr key={m.id}>
+                  {puedeConciliar ? (
+                    <td><input type="checkbox" checked={!!m.conciliado} onChange={(e) => marcar([m], e.target.checked)} title={m.conciliado ? `Conciliado por ${m.conciliadoPorNombre || ""}` : "Marcar como conciliado"} /></td>
+                  ) : null}
+                  <td>{fmtFecha(m.fechaMov)}</td>
+                  <td>{m.codigoMov}</td>
+                  <td>{m.concepto}</td>
+                  <td>{TIPOS_MOV_BANCARIO[m.tipo] || m.tipo}</td>
+                  <td>{m.referencia || "—"}</td>
+                  <td style={{ textAlign: "right" }}>{m.signo > 0 ? nfRep(m.monto) : ""}</td>
+                  <td style={{ textAlign: "right" }}>{m.signo < 0 ? nfRep(m.monto) : ""}</td>
+                  <td style={{ textAlign: "right" }}>{nfRep(m.saldoCorrido)}</td>
+                  {!puedeConciliar ? <td>{m.conciliado ? "Sí" : "No"}</td> : null}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BancosPage({ currentUid, currentUserName, role, empresaNombre, logoDataUrl }) {
+  const cuentas = useCuentasBancarias();
+  const [tab, setTab] = useState("cuentas");
+  const [cuentaId, setCuentaId] = useState("");
+  const [editando, setEditando] = useState(undefined); // undefined = cerrado, null = nueva, objeto = editar
+  const [movModo, setMovModo] = useState(null);
+  const [toast, setToast] = useState("");
+  const puedeConciliar = hasActionAccess(role, "finanzas.conciliar");
+  const activas = cuentas.filter((c) => c.activo !== false);
+
+  useEffect(() => {
+    if (!cuentaId && cuentas.length > 0) setCuentaId(cuentas[0].id);
+  }, [cuentas.length]);
+
+  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(""), 2600); };
+
+  const guardarCuenta = async (datos) => {
+    if (editando) {
+      await db.collection("cuentasBancarias").doc(editando.id).update({
+        banco: datos.banco, nombre: datos.nombre, numeroCuenta: datos.numeroCuenta || null, titular: datos.titular || null, tipo: datos.tipo,
+        actualizadoEn: firebase.firestore.FieldValue.serverTimestamp(),
+      });
+      showToast("Cuenta actualizada.");
+    } else {
+      await crearCuentaBancaria(datos);
+      showToast("Cuenta creada.");
+    }
+    setEditando(undefined);
+  };
+
+  const toggleCuenta = async (c) => {
+    try {
+      await db.collection("cuentasBancarias").doc(c.id).update({ activo: c.activo === false, actualizadoEn: firebase.firestore.FieldValue.serverTimestamp() });
+    } catch (err) { console.error(err); showToast("No se pudo cambiar el estado."); }
+  };
+
+  return (
+    <div>
+      <div className="page-header">
+        <div>
+          <h1>Bancos</h1>
+          <p>Cuentas bancarias, depósitos, retiros y transferencias. Los cobros y pagos que no son en efectivo se acreditan o debitan acá, y todo se puede conciliar contra el extracto.</p>
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button className="btn btn-secondary" style={{ width: "auto" }} disabled={activas.length === 0} onClick={() => setMovModo("deposito")}>Depósito</button>
+          <button className="btn btn-secondary" style={{ width: "auto" }} disabled={activas.length === 0} onClick={() => setMovModo("retiro")}>Retiro / débito</button>
+          <button className="btn btn-secondary" style={{ width: "auto" }} disabled={activas.length < 2} onClick={() => setMovModo("transferencia")}>Transferencia</button>
+          <button className="btn btn-primary" style={{ width: "auto" }} onClick={() => setEditando(null)}>+ Nueva cuenta</button>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
+        {[["cuentas", "Cuentas"], ["movimientos", "Movimientos y conciliación"]].map(([k, t]) => (
+          <button key={k} type="button" className={"btn " + (tab === k ? "btn-primary" : "btn-secondary")} style={{ width: "auto" }} onClick={() => setTab(k)}>{t}</button>
+        ))}
+      </div>
+
+      {tab === "cuentas" ? (
+        <BancosCuentasTab cuentas={cuentas} onNueva={() => setEditando(null)} onEditar={(c) => setEditando(c)} onToggle={toggleCuenta}
+          onVerMovimientos={(id) => { setCuentaId(id); setTab("movimientos"); }} />
+      ) : (
+        <BancosMovimientosTab cuentas={cuentas} cuentaId={cuentaId} setCuentaId={setCuentaId} puedeConciliar={puedeConciliar}
+          usuarioId={currentUid} usuarioNombre={currentUserName} empresaNombre={empresaNombre} logoDataUrl={logoDataUrl} showToast={showToast} />
+      )}
+
+      {editando !== undefined ? (
+        <CuentaBancariaModal cuenta={editando} onClose={() => setEditando(undefined)} onGuardar={guardarCuenta} />
+      ) : null}
+      {movModo ? (
+        <MovimientoBancarioModal modo={movModo} cuentas={activas} cuentaInicialId={tab === "movimientos" ? cuentaId : ""}
+          usuarioId={currentUid} usuarioNombre={currentUserName}
+          onClose={() => setMovModo(null)} onListo={(m) => { setMovModo(null); showToast(m); }} />
+      ) : null}
+      {toast ? <div className="toast">{toast}</div> : null}
     </div>
   );
 }
@@ -5769,6 +7112,9 @@ function PageContent({ moduleKey, pageKey, currentUid, currentUserName, role, em
     return <InformeComprasPage empresaNombre={empresaNombre} logoDataUrl={logoDataUrl} />;
   }
 
+  if (moduleKey === "finanzas" && pageKey === "bancos") {
+    return <BancosPage currentUid={currentUid} currentUserName={currentUserName} role={role} empresaNombre={empresaNombre} logoDataUrl={logoDataUrl} />;
+  }
   if (moduleKey === "finanzas" && pageKey === "pagos") {
     return <PagosProveedoresPage currentUid={currentUid} currentUserName={currentUserName} />;
   }
@@ -5815,6 +7161,9 @@ function PageContent({ moduleKey, pageKey, currentUid, currentUserName, role, em
     return <RecepcionMercaderiaPage currentUid={currentUid} currentUserName={currentUserName} />;
   }
 
+  if (moduleKey === "stock" && pageKey === "salidas") {
+    return <SalidasProductosPage currentUid={currentUid} currentUserName={currentUserName} role={role} />;
+  }
   if (moduleKey === "stock" && pageKey === "traslados") {
     return <TrasladoMercaderiaPage currentUid={currentUid} currentUserName={currentUserName} />;
   }

@@ -48,6 +48,7 @@ const MODULE_ACCESS = {
 const ACTION_ACCESS = {
   "stock.ajustar": [ROLES.ADMIN, ROLES.GERENCIA, ROLES.DEPOSITO],
   "stock.aprobar_perdida": [ROLES.ADMIN, ROLES.GERENCIA],
+  "stock.anular_salida": [ROLES.ADMIN, ROLES.GERENCIA],
   "compras.aprobar_oc": [ROLES.ADMIN, ROLES.GERENCIA],
   "pos.descuento": [ROLES.ADMIN, ROLES.GERENCIA, ROLES.CAJERO],
   "pos.anular_venta": [ROLES.ADMIN, ROLES.GERENCIA],

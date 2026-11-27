@@ -119,6 +119,20 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
+    match /salidasProductos/{docId} {
+      // Salida de mercadería sin venta (obsequios y probadores). Inmutable:
+      // solo admin/gerencia pueden anularla (una vez), cambiando únicamente
+      // los campos propios de la anulación.
+      allow read: if hasRole(['admin', 'gerencia', 'deposito', 'compras', 'vendedor', 'cajero']);
+      allow create: if hasRole(['admin', 'gerencia', 'deposito', 'vendedor', 'cajero']);
+      allow update: if hasRole(['admin', 'gerencia']) &&
+        resource.data.estado == 'emitida' &&
+        request.resource.data.estado == 'anulada' &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['estado', 'motivoAnulacion', 'anuladaPorId', 'anuladaPorNombre', 'anuladaEn']);
+      allow delete: if false;
+    }
+
     match /ordenesCompra/{docId} {
       // Pedido al proveedor. Se puede actualizar (estado y cantidades
       // recibidas, por una recepción o una anulación) pero nunca borrar.
@@ -182,6 +196,28 @@ service cloud.firestore {
       allow read: if hasRole(['admin', 'gerencia', 'finanzas']);
       allow create: if hasRole(['admin', 'gerencia', 'finanzas']);
       allow update, delete: if false;
+    }
+
+    /* ---------------------------------------------------------- */
+    /* Bancos (v0.19.0)                                             */
+    /* ---------------------------------------------------------- */
+
+    match /cuentasBancarias/{docId} {
+      // El saldo lo actualizan las transacciones de cobros/pagos/movimientos
+      // (mismos roles). Las cuentas nunca se borran: se desactivan.
+      allow read: if hasRole(['admin', 'gerencia', 'finanzas']);
+      allow create, update: if hasRole(['admin', 'gerencia', 'finanzas']);
+      allow delete: if false;
+    }
+
+    match /movimientosBancarios/{docId} {
+      // Inmutable salvo la marca de conciliación (solo admin/finanzas).
+      allow read: if hasRole(['admin', 'gerencia', 'finanzas']);
+      allow create: if hasRole(['admin', 'gerencia', 'finanzas']);
+      allow update: if hasRole(['admin', 'finanzas']) &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['conciliado', 'conciliadoEn', 'conciliadoPorId', 'conciliadoPorNombre']);
+      allow delete: if false;
     }
 
     match /movimientosFinancieros/{docId} {
